@@ -580,4 +580,4 @@ player.CharacterAdded:Connect(function(newChar)
 	isFlying = false
 	if linearVelocity then linearVelocity.MaxForce = 0 end
 	setupCharacter(newChar)
-end)w
+end)
