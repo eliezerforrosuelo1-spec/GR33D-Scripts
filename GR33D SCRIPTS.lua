@@ -63,15 +63,24 @@ local FLY_SPEED = 50
 local runSpeedValue = 50         
 local DOUBLE_TAP_WINDOW = 0.35   
 
+-- [NEW] Anti-Fling & Anti-Ragdoll Configuration
+local MAX_SPEED = 150                 -- Max linear velocity before clamping
+local MAX_ANGULAR = 50                -- Max angular velocity before clamping
+local MAX_TELEPORT_DISTANCE = 150     -- Studs. If moved further in 1 frame, snap back.
+local DEFAULT_WALKSPEED = 16          -- Restore value if tampered
+local DEFAULT_JUMPPOWER = 50          -- Restore value if tampered
+
 getgenv().NoclipActive = false 
 
 local flyToggleEnabled = false
 local isFlying = false
 local godModeEnabled = false
 local noFallDamageEnabled = false
-local ragdollEnabled = false
 local runSpeedEnabled = false
+local antiFlingEnabled = false        -- NEW: Toggle for Anti-Fling
 local isMinimized = false
+local isTeleporting = false           -- NEW: Prevents anti-teleport from blocking script teleports
+local lastPos = nil                   -- NEW: Tracks position for anti-teleport
 
 local lastJumpTapTime = 0
 local lastJumpReqTime = 0
@@ -153,7 +162,7 @@ toggleContainer.Size = UDim2.new(1, 0, 1, -45)
 toggleContainer.Position = UDim2.new(0, 0, 0, 45)
 toggleContainer.BackgroundTransparency = 1
 toggleContainer.BorderSizePixel = 0
-toggleContainer.CanvasSize = UDim2.new(0, 0, 0, 420)
+toggleContainer.CanvasSize = UDim2.new(0, 0, 0, 420) 
 toggleContainer.ScrollBarThickness = 4
 toggleContainer.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 75)
 toggleContainer.Parent = mainFrame
@@ -288,6 +297,9 @@ local function absoluteTeleport(targetCFrame)
 	
 	if not currentTargetChar or not currentTargetRoot then return end
 	
+	-- Set teleporting flag to bypass Anti-Teleport
+	isTeleporting = true
+	
 	if currentTargetHum then
 		currentTargetHum.Sit = false
 		currentTargetHum:ChangeState(Enum.HumanoidStateType.GettingUp)
@@ -308,6 +320,8 @@ local function absoluteTeleport(targetCFrame)
 		if currentTargetHum and currentTargetHum.Parent then
 			currentTargetHum:ChangeState(Enum.HumanoidStateType.Running)
 		end
+		-- Reset teleporting flag
+		isTeleporting = false
 	end)
 end
 
@@ -371,17 +385,20 @@ createToggleRow("Force Noclip Bypass", 110, function(state)
 	end
 end)
 
-createToggleRow("Absolute Hit/Ragdoll Immunity", 145, function(state)
-	ragdollEnabled = state
+-- [REPLACED] Old toggle is now the new Absolute Anti-Ragdoll & Anti-Fling
+createToggleRow("Absolute Anti-Ragdoll & Anti-Fling", 145, function(state)
+	antiFlingEnabled = state
 	if humanoid then
 		if state then
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 		else
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, true)
 			humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, true)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
 		end
 	end
 end)
@@ -505,6 +522,59 @@ RunService.Stepped:Connect(function()
 	if rootPart.Position.Y < -50 then
 		absoluteTeleport(getEntrySpawn())
 	end
+
+    -- ===============================================================
+    -- [NEW] ABSOLUTE ANTI-RAGDOLL & ANTI-FLING LOOP
+    -- ===============================================================
+    if antiFlingEnabled then
+        -- 1) Unanchor if a fling script anchored us (freeze fling)
+        if rootPart.Anchored and not isTeleporting then 
+            rootPart.Anchored = false 
+        end
+
+        -- 2) Clamp Linear Velocity (Stops regular flings) - Skip if flying
+        if not isFlying then
+            local vel = rootPart.AssemblyLinearVelocity
+            if vel.Magnitude > MAX_SPEED then
+                rootPart.AssemblyLinearVelocity = vel.Unit * MAX_SPEED
+            end
+        end
+
+        -- 3) Clamp Angular Velocity (Stops spin/throw flings)
+        local angVel = rootPart.AssemblyAngularVelocity
+        if angVel.Magnitude > MAX_ANGULAR then
+            rootPart.AssemblyAngularVelocity = angVel.Unit * MAX_ANGULAR
+        end
+
+        -- 4) Reclaim Network Ownership ONLY if we don't have it
+        local owner = rootPart:GetNetworkOwner()
+        if owner and owner ~= player then
+            pcall(function() rootPart:SetNetworkOwner(player) end)
+        end
+
+        -- 5) Anti-Teleport: Snap back if moved an impossible distance (Bypass if script is teleporting)
+        if not isTeleporting and lastPos then
+            local currentPos = rootPart.Position
+            if (currentPos - lastPos).Magnitude > MAX_TELEPORT_DISTANCE then
+                rootPart.CFrame = CFrame.new(lastPos)
+            else
+                lastPos = currentPos
+            end
+        else
+            lastPos = rootPart.Position
+        end
+
+        -- 6) Restore Stats if manipulated to extreme values (Skip if user enabled Super Run)
+        if not runSpeedEnabled and (humanoid.WalkSpeed <= 0 or humanoid.WalkSpeed > 100) then 
+            humanoid.WalkSpeed = DEFAULT_WALKSPEED 
+        end
+        if humanoid.JumpPower <= 0 or humanoid.JumpPower > 100 then 
+            humanoid.JumpPower = DEFAULT_JUMPPOWER 
+        end
+    else
+        -- Keep lastPos updated even when anti-fling is off to prevent false positives on enable
+        lastPos = rootPart.Position
+    end
 end)
 
 RunService.RenderStepped:Connect(function()
@@ -563,6 +633,66 @@ local function setupCharacter(char)
 	linearVelocity.MaxForce = 0
 	linearVelocity.VectorVelocity = Vector3.zero
 	linearVelocity.Parent = rootPart
+	
+	-- Initialize lastPos for Anti-Teleport
+	lastPos = rootPart.Position
+	
+	-- ===============================================================
+	-- [NEW] SETUP ABSOLUTE ANTI-RAGDOLL & ANTI-FLING EVENT LISTENERS
+	-- ===============================================================
+	
+	-- 1) Force-exit ragdoll if a script flips us into it
+	humanoid.StateChanged:Connect(function(_, newState)
+		if antiFlingEnabled then
+			if newState == Enum.HumanoidStateType.Ragdoll
+			or newState == Enum.HumanoidStateType.FallingDown
+			or newState == Enum.HumanoidStateType.Physics then
+				pcall(function()
+					humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+				end)
+			end
+		end
+	end)
+
+	-- 2) Prevent PlatformStand & Sitting (stops you from being frozen)
+	humanoid:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+		if antiFlingEnabled and humanoid.PlatformStand then 
+			humanoid.PlatformStand = false 
+		end
+	end)
+	
+	humanoid:GetPropertyChangedSignal("Sit"):Connect(function()
+		if antiFlingEnabled and humanoid.Sit then 
+			humanoid.Sit = false 
+		end
+	end)
+
+	-- 3) Remove Fling/Force instances from WHOLE body
+	char.DescendantAdded:Connect(function(child)
+		if antiFlingEnabled then
+			if child:IsA("BodyVelocity") or child:IsA("BodyAngularVelocity") 
+			or child:IsA("LinearVelocity") or child:IsA("AngularVelocity")
+			or child:IsA("AlignPosition") or child:IsA("AlignOrientation")
+			or child:IsA("Weld") or child:IsA("Motor6D") then
+				
+				-- Don't delete legitimate Motor6Ds (joints) the game uses for animations
+				if child:IsA("Motor6D") and child.Name ~= "FlingMotor" then return end
+				if child.Name == "FlightVelocity" then return end -- Don't delete our own flight instance
+				
+				task.defer(function()
+					if child and child.Parent then child:Destroy() end
+				end)
+			end
+		end
+	end)
+	
+	-- Apply ragdoll immunity states immediately if it was already enabled
+	if antiFlingEnabled then
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+	end
 	
 	if godModeEnabled then
 		humanoid.Health = humanoid.MaxHealth
