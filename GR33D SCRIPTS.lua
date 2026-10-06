@@ -11,7 +11,6 @@ pcall(function()
 	local oldNamecall = mt.__namecall
 	local oldNewIndex = mt.__newindex
 	
-	-- Block Kick attempts
 	mt.__namecall = newcclosure(function(self, ...)
 		local method = getnamecallmethod()
 		if not checkcaller() and (method == "Kick" or method == "kick") and self == game.Players.LocalPlayer then
@@ -21,16 +20,13 @@ pcall(function()
 		return oldNamecall(self, ...)
 	end)
 	
-	-- Conditional Hook: Only blocks game actions if a cheat toggle is ON
 	mt.__newindex = newcclosure(function(t, k, v)
 		if not checkcaller() and typeof(t) == "Instance" and t:IsA("BasePart") then
 			local char = game.Players.LocalPlayer.Character
 			if char and t:IsDescendantOf(char) then
-				-- Only block anchoring if Noclip or Anti-Fling is active
 				if (getgenv().NoclipActive or getgenv().AntiFlingActive) and k == "Anchored" and v == true then
 					return
 				end
-				-- Only block HRP collision changes if Noclip is active
 				if getgenv().NoclipActive and t.Name == "HumanoidRootPart" and k == "CanCollide" and v == true then
 					return
 				end
@@ -62,9 +58,10 @@ local DOUBLE_TAP_WINDOW = 0.35
 -- Anti-Fling & Anti-Ragdoll Configuration
 local MAX_SPEED = 150                 
 local MAX_ANGULAR = 50                
-local MAX_TELEPORT_DISTANCE = 500     -- High threshold so normal player pushes don't trigger it
+local MAX_TELEPORT_DISTANCE = 500     
 local DEFAULT_WALKSPEED = 16          
 local DEFAULT_JUMPPOWER = 50          
+local SMOOTHING_FACTOR = 0.35         
 
 local flyToggleEnabled = false
 local isFlying = false
@@ -72,10 +69,11 @@ local godModeEnabled = false
 local noFallDamageEnabled = false
 local runSpeedEnabled = false
 local antiFlingEnabled = false        
-local antiTrapEnabled = false         -- Anti Trap Toggle
+local antiTrapEnabled = false         
 local isMinimized = false
 local isTeleporting = false           
 local lastPos = nil                   
+local isRecovering = false            
 
 local lastJumpTapTime = 0
 local lastJumpReqTime = 0
@@ -84,8 +82,8 @@ local savedMapCFrame = nil
 
 local character, rootPart, humanoid
 local attachment, linearVelocity
+local isRestoringStats = false
 
--- Controls module handler for smooth camera-relative flight
 local controls = nil
 pcall(function()
 	local playerScripts = player:WaitForChild("PlayerScripts", 5)
@@ -116,7 +114,75 @@ local function isNearLadder(char)
 end
 
 -- ==========================================
--- UI CREATION (GR33D Scripts)
+-- HARD RAGDOLL RECOVERY SYSTEM
+-- ==========================================
+local function recoverFromRagdoll()
+	if isRecovering or not character or not rootPart or not humanoid then return end
+	isRecovering = true
+	
+	pcall(function() rootPart:SetNetworkOwner(player) end)
+	if rootPart.Anchored then rootPart.Anchored = false end
+	
+	humanoid.PlatformStand = false
+	humanoid.Sit = false
+	
+	rootPart.AssemblyLinearVelocity = Vector3.zero
+	rootPart.AssemblyAngularVelocity = Vector3.zero
+	
+	pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+	
+	local currentPos = rootPart.Position
+	local lookVector = rootPart.CFrame.LookVector
+	local uprightCFrame = CFrame.new(currentPos, currentPos + Vector3.new(lookVector.X, 0, lookVector.Z))
+	rootPart.CFrame = uprightCFrame
+	
+	task.delay(0.1, function()
+		if humanoid and humanoid.Parent then
+			pcall(function()
+				if humanoid.FloorMaterial ~= Enum.Material.Air then
+					humanoid:ChangeState(Enum.HumanoidStateType.Running)
+				else
+					humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+				end
+			end)
+		end
+		isRecovering = false
+	end)
+end
+
+-- ==========================================
+-- SMOOTH STAT RESTORATION
+-- ==========================================
+local function smoothRestoreStats()
+	if isRestoringStats or not humanoid then return end
+	isRestoringStats = true
+	
+	task.spawn(function()
+		if not runSpeedEnabled and (humanoid.WalkSpeed <= 0 or humanoid.WalkSpeed > 100) then
+			local target = DEFAULT_WALKSPEED
+			for i = 1, 8 do
+				if not antiFlingEnabled or not humanoid or not humanoid.Parent then break end
+				humanoid.WalkSpeed = humanoid.WalkSpeed + (target - humanoid.WalkSpeed) * 0.3
+				task.wait(0.02)
+			end
+			if humanoid and humanoid.Parent then humanoid.WalkSpeed = target end
+		end
+		
+		if humanoid and humanoid.Parent and (humanoid.JumpPower <= 0 or humanoid.JumpPower > 100) then
+			local target = DEFAULT_JUMPPOWER
+			for i = 1, 8 do
+				if not antiFlingEnabled or not humanoid or not humanoid.Parent then break end
+				humanoid.JumpPower = humanoid.JumpPower + (target - humanoid.JumpPower) * 0.3
+				task.wait(0.02)
+			end
+			if humanoid and humanoid.Parent then humanoid.JumpPower = target end
+		end
+		isRestoringStats = false
+	end)
+end
+
+-- ==========================================
+-- UI CREATION
 -- ==========================================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "DevPanelGui"
@@ -413,11 +479,9 @@ createToggleRow("Absolute Anti-Ragdoll & Anti-Fling", 145, function(state)
 	end
 end)
 
--- [NEW] Anti Trap Toggle (Only CanTouch = false)
 createToggleRow("Anti Trap (CanTouch Only)", 180, function(state)
 	antiTrapEnabled = state
 	if not state and character then
-		-- Restore only CanTouch when turned off
 		for _, part in ipairs(character:GetDescendants()) do
 			if part:IsA("BasePart") then
 				part.CanTouch = true
@@ -508,11 +572,6 @@ end)
 RunService.Stepped:Connect(function()
 	if not character or not rootPart then return end
 	
-	-- ===============================================================
-	-- COLLISION LOGIC: ONLY RUNS IF A TOGGLE IS ACTIVE
-	-- ===============================================================
-	
-	-- 1) Noclip Logic
 	if getgenv().NoclipActive then
 		if rootPart.Anchored then rootPart.Anchored = false end
 		for _, part in ipairs(character:GetDescendants()) do
@@ -528,71 +587,80 @@ RunService.Stepped:Connect(function()
 				end
 			end
 		end
-		
-	-- 2) Anti Trap Logic (Only CanTouch)
 	elseif antiTrapEnabled then
 		local nearLadder = isNearLadder(character)
 		for _, part in ipairs(character:GetDescendants()) do
 			if part:IsA("BasePart") then
 				if nearLadder then
-					part.CanTouch = true -- Allow climbing
+					part.CanTouch = true
 				else
-					part.CanTouch = false -- Trap immunity
+					part.CanTouch = false
 				end
-				-- We do NOT touch CanCollide, CanQuery, or CollisionGroup here. This prevents the invisible wall.
 			end
 		end
 	end
-	-- No else block! Script stays silent when toggles are off.
 	
 	if rootPart.Position.Y < -50 then
 		absoluteTeleport(getEntrySpawn())
 	end
 
-    -- ===============================================================
-    -- ABSOLUTE ANTI-RAGDOLL & ANTI-FLING LOOP
-    -- ===============================================================
     if antiFlingEnabled then
-        if rootPart.Anchored and not isTeleporting then 
-            rootPart.Anchored = false 
-        end
-
-        if not isFlying then
-            local vel = rootPart.AssemblyLinearVelocity
-            if vel.Magnitude > MAX_SPEED then
-                rootPart.AssemblyLinearVelocity = vel.Unit * MAX_SPEED
-            end
-        end
-
-        local angVel = rootPart.AssemblyAngularVelocity
-        if angVel.Magnitude > MAX_ANGULAR then
-            rootPart.AssemblyAngularVelocity = angVel.Unit * MAX_ANGULAR
-        end
-
-        local owner = rootPart:GetNetworkOwner()
-        if owner and owner ~= player then
-            pcall(function() rootPart:SetNetworkOwner(player) end)
-        end
-
-        if not isTeleporting and lastPos then
-            local currentPos = rootPart.Position
-            if (currentPos - lastPos).Magnitude > MAX_TELEPORT_DISTANCE then
-                rootPart.CFrame = CFrame.new(lastPos)
-            else
-                lastPos = currentPos
-            end
+        local currentState = humanoid:GetState()
+        local isBrokenState = currentState == Enum.HumanoidStateType.Physics 
+            or currentState == Enum.HumanoidStateType.Ragdoll 
+            or currentState == Enum.HumanoidStateType.FallingDown
+            or humanoid.PlatformStand
+        
+        local lookVector = rootPart.CFrame.LookVector
+        local isTilted = math.abs(lookVector.Y) > 0.7
+        
+        if isBrokenState or isTilted then
+            recoverFromRagdoll()
         else
-            lastPos = rootPart.Position
-        end
+            if rootPart.Anchored and not isTeleporting then 
+                rootPart.Anchored = false 
+            end
 
-        if not runSpeedEnabled and (humanoid.WalkSpeed <= 0 or humanoid.WalkSpeed > 100) then 
-            humanoid.WalkSpeed = DEFAULT_WALKSPEED 
-        end
-        if humanoid.JumpPower <= 0 or humanoid.JumpPower > 100 then 
-            humanoid.JumpPower = DEFAULT_JUMPPOWER 
+            if not isFlying then
+                local vel = rootPart.AssemblyLinearVelocity
+                if vel.Magnitude > MAX_SPEED then
+                    local targetVel = vel.Unit * MAX_SPEED
+                    rootPart.AssemblyLinearVelocity = vel:Lerp(targetVel, SMOOTHING_FACTOR)
+                end
+            end
+
+            local angVel = rootPart.AssemblyAngularVelocity
+            if angVel.Magnitude > MAX_ANGULAR then
+                local targetAng = angVel.Unit * MAX_ANGULAR
+                rootPart.AssemblyAngularVelocity = angVel:Lerp(targetAng, SMOOTHING_FACTOR)
+            end
+
+            local owner = rootPart:GetNetworkOwner()
+            if owner and owner ~= player then
+                pcall(function() rootPart:SetNetworkOwner(player) end)
+            end
+
+            if not isTeleporting and lastPos then
+                local currentPos = rootPart.Position
+                local distanceMoved = (currentPos - lastPos).Magnitude
+                if distanceMoved > MAX_TELEPORT_DISTANCE then
+                    local correctionCFrame = CFrame.new(lastPos, lastPos + rootPart.CFrame.LookVector)
+                    rootPart.CFrame = rootPart.CFrame:Lerp(correctionCFrame, 0.5)
+                else
+                    lastPos = currentPos
+                end
+            else
+                lastPos = rootPart.Position
+            end
+
+            if not runSpeedEnabled and (humanoid.WalkSpeed <= 0 or humanoid.WalkSpeed > 100) then 
+                smoothRestoreStats()
+            end
+            if humanoid.JumpPower <= 0 or humanoid.JumpPower > 100 then 
+                smoothRestoreStats()
+            end
         end
     else
-        -- Keep lastPos updated even when anti-fling is off to prevent false positives on enable
         lastPos = rootPart.Position
     end
 end)
@@ -661,8 +729,14 @@ local function setupCharacter(char)
 			if newState == Enum.HumanoidStateType.Ragdoll
 			or newState == Enum.HumanoidStateType.FallingDown
 			or newState == Enum.HumanoidStateType.Physics then
-				pcall(function()
-					humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+				task.defer(function()
+					if humanoid and humanoid.Parent then
+						if humanoid.FloorMaterial ~= Enum.Material.Air then
+							pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+						else
+							pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Freefall) end)
+						end
+					end
 				end)
 			end
 		end
@@ -681,7 +755,6 @@ local function setupCharacter(char)
 	end)
 
 	char.DescendantAdded:Connect(function(child)
-		-- Apply Anti-Trap to new parts if active
 		if antiTrapEnabled and child:IsA("BasePart") then
 			if not isNearLadder(char) then
 				child.CanTouch = false
@@ -723,8 +796,8 @@ end
 
 setupCharacter(player.Character or player.CharacterAdded:Wait())
 player.CharacterAdded:Connect(function(newChar)
-	flyToggleEnabled = false
-	isFlying = false
+	-- [FIX] Removed the lines that were resetting the flight toggle.
+	-- Now if the UI switch is still ON, flight mode will re-activate automatically.
 	if linearVelocity then linearVelocity.MaxForce = 0 end
 	setupCharacter(newChar)
 end)
