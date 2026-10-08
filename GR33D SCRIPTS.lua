@@ -1,5 +1,6 @@
 -- ==========================================
 -- GR33D PANEL — ANTI EXPLOITER + AFK STREAK + ANTI MONSTER
+-- (Fix: Anti Exploiter now fully turns off)
 -- ==========================================
 getgenv().NoclipActive         = false
 getgenv().AntiFlingActive      = false
@@ -307,6 +308,10 @@ local AE_MAX_DELTA      = 400
 local AE_MAX_VELOCITY   = 2500
 local AE_MAX_ANGULAR    = 200
 local AE_SNAP_VELOCITY  = 1500
+
+-- Track whether AE auto-enabled Immortal, and a setter for the Immortal toggle
+local AE_autoImmortal      = false
+local immortalToggleSetter = nil
 
 local AI_DANGER_DIST = 15
 local AI_ESCAPE_DIST = 15
@@ -1020,6 +1025,7 @@ toggleContainer.ScrollBarThickness = 6
 toggleContainer.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 75)
 toggleContainer.Parent = mainFrame
 
+-- Toggle row builder that returns a setter so external code can flip the visual
 local function createToggleRow(name, yPos, callback, defaultOn)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(0.9, 0, 0, 32)
@@ -1055,26 +1061,36 @@ local function createToggleRow(name, yPos, callback, defaultOn)
     Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
     local activeState = defaultOn and true or false
-    if activeState then
-        switchBg.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
-        knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        knob.Position = UDim2.new(1, -17, 0.5, -7)
-    end
 
-    switchBg.MouseButton1Click:Connect(function()
-        activeState = not activeState
-        if activeState then
+    local function setVisual(state, animate)
+        activeState = state
+        if state then
             switchBg.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
             knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-            knob:TweenPosition(UDim2.new(1, -17, 0.5, -7), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.15, true)
+            if animate then
+                knob:TweenPosition(UDim2.new(1, -17, 0.5, -7), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.15, true)
+            else
+                knob.Position = UDim2.new(1, -17, 0.5, -7)
+            end
         else
             switchBg.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
             knob.BackgroundColor3 = Color3.fromRGB(200, 200, 210)
-            knob:TweenPosition(UDim2.new(0, 3, 0.5, -7), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.15, true)
+            if animate then
+                knob:TweenPosition(UDim2.new(0, 3, 0.5, -7), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.15, true)
+            else
+                knob.Position = UDim2.new(0, 3, 0.5, -7)
+            end
         end
+    end
+
+    setVisual(activeState, false)
+
+    switchBg.MouseButton1Click:Connect(function()
+        setVisual(not activeState, true)
         pcall(callback, activeState)
     end)
-    return row
+
+    return row, setVisual
 end
 
 local function createInputRow(name, yPos, defaultVal, callback)
@@ -1186,7 +1202,8 @@ createToggleRow("Flight Mode", 5, function(state)
     if not state then setFlying(false) end
 end)
 
-createToggleRow("Immortal Mode", 40, function(state)
+-- Immortal Mode captures its own setter so Anti Exploiter can flip it visually
+local _, immortalSetVisual = createToggleRow("Immortal Mode", 40, function(state)
     godModeEnabled = state
     getgenv().ImmortalActive = state
     if state then
@@ -1201,6 +1218,7 @@ createToggleRow("Immortal Mode", 40, function(state)
         end
     end
 end)
+immortalToggleSetter = immortalSetVisual
 
 createToggleRow("No Fall Damage", 75, function(state)
     noFallDamageEnabled = state
@@ -1250,16 +1268,26 @@ createInputRow("Run Speed Value", 250, 50, function(value)
     runSpeedValue = value
 end)
 
+-- ==========================================
+-- ANTI EXPLOITER (turns off cleanly)
+-- ==========================================
 createToggleRow("🛡 Anti Exploiter", 285, function(state)
     getgenv().AbsoluteActive = state
     getgenv().AntiExploitActive = state
+
     if state then
+        -- Auto-enable Immortal if it's currently off, and remember we did so
         if not getgenv().ImmortalActive then
             godModeEnabled = true
             getgenv().ImmortalActive = true
+            AE_autoImmortal = true
             immortal_apply()
             if humanoid then immortal_hookHumanoid(humanoid) end
+            if immortalToggleSetter then immortalToggleSetter(true, true) end
+        else
+            AE_autoImmortal = false
         end
+
         task.defer(function()
             task.wait(0.2)
             AE_snapshotJoints()
@@ -1267,6 +1295,23 @@ createToggleRow("🛡 Anti Exploiter", 285, function(state)
         AE_lastPos = rootPart and rootPart.Position or nil
         print("[Anti Exploiter] ENABLED")
     else
+        -- If we auto-enabled Immortal, turn it back off
+        if AE_autoImmortal then
+            AE_autoImmortal = false
+            godModeEnabled = false
+            getgenv().ImmortalActive = false
+            if humanoid then
+                pcall(function()
+                    humanoid.MaxHealth = 100
+                    humanoid.Health = math.min(humanoid.Health, 100)
+                end)
+            end
+            if immortalToggleSetter then immortalToggleSetter(false, true) end
+        end
+
+        -- Clear cached state so next enable starts clean
+        AE_lastPos = nil
+        AE_jointSnapshot = {}
         print("[Anti Exploiter] DISABLED")
     end
 end)
@@ -1595,9 +1640,12 @@ RunService.Heartbeat:Connect(function()
 end)
 
 print("=========================================")
-print("GR33D — PANIC BUTTON REMOVED")
-print("  🛡 Anti Exploiter — aggressive")
+print("GR33D — Anti Exploiter Toggle Fix Applied")
+print("  🛡 Anti Exploiter — turns off cleanly")
+print("     • Disables metatable protection")
+print("     • Turns off auto-enabled Immortal Mode")
+print("     • Visually flips Immortal toggle back off")
+print("     • Clears joint snapshot cache")
 print("  👾 Anti Monster — full detection engine")
 print("  🌙 AFK Streak — position lock")
-print("  ✅ Pets/grapples/tools unaffected")
 print("=========================================")
