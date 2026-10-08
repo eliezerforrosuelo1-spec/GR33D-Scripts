@@ -1,6 +1,13 @@
 -- ==========================================
--- GR33D PANEL — ANTI EXPLOITER + AFK STREAK + ANTI MONSTER
--- (Fix: Anti Exploiter now fully turns off)
+-- GR33D PANEL — FULL UPDATED
+-- Features:
+--   🛡 Anti Exploiter (snap-back + joint rebuild + actuator cleanup)
+--   🔒 Position Lock (invisible ForceField shield + absolute freeze)
+--   💀 Immortal Mode
+--   🪂 No Fall Damage
+--   👾 Anti Monster
+--   🌙 AFK Streak
+--   ✈️ Flight Mode + Noclip + Speed + TP buttons
 -- ==========================================
 getgenv().NoclipActive         = false
 getgenv().AntiFlingActive      = false
@@ -10,6 +17,7 @@ getgenv().AISkyWalkActive      = false
 getgenv().ImmortalActive       = false
 getgenv().NoFallDamageActive   = false
 getgenv().AFKStreakActive      = false
+getgenv().PositionLockActive   = false
 
 AI_isSkyWalking = false
 
@@ -27,7 +35,7 @@ end
 local camera = workspace.CurrentCamera
 
 -- ==========================================
--- STRICT TARGET CHECKS
+-- STRICT BODY PART DETECTION
 -- ==========================================
 local BODY_PART_NAMES = {
     HumanoidRootPart = true, Head = true,
@@ -46,6 +54,18 @@ local function isOurBodyPart(inst)
     if not char then return false end
     if inst.Parent ~= char then return false end
     return BODY_PART_NAMES[inst.Name] == true
+end
+
+local function hasBodyPartAncestor(inst)
+    if typeof(inst) ~= "Instance" then return false end
+    local cur = inst
+    local safety = 0
+    while cur and cur ~= workspace and safety < 20 do
+        if isOurBodyPart(cur) then return true end
+        cur = cur.Parent
+        safety = safety + 1
+    end
+    return false
 end
 
 local function isOurHumanoid(inst)
@@ -72,23 +92,17 @@ local function isOurBodyJoint(inst)
 end
 
 -- ==========================================
--- METATABLE LOCKDOWN
+-- METATABLE HOOK — METHOD CALLS ONLY
 -- ==========================================
 pcall(function()
     local mt = getrawmetatable(game)
     if not mt then return end
     setreadonly(mt, false)
-
     local oldNamecall = mt.__namecall
-    local oldNewIndex = mt.__newindex
 
     mt.__namecall = newcclosure(function(self, ...)
-        if not getgenv().AbsoluteActive then
-            return oldNamecall(self, ...)
-        end
-        if checkcaller and checkcaller() then
-            return oldNamecall(self, ...)
-        end
+        if not getgenv().AbsoluteActive then return oldNamecall(self, ...) end
+        if checkcaller and checkcaller() then return oldNamecall(self, ...) end
 
         local method = getnamecallmethod()
 
@@ -97,30 +111,20 @@ pcall(function()
             return oldNamecall(self, ...)
         end
 
-        if method ~= "TakeDamage"
-           and method ~= "BreakJoints"
-           and method ~= "ChangeState"
-           and method ~= "SetStateEnabled"
-           and method ~= "SetNetworkOwner"
-           and method ~= "PivotTo"
-           and method ~= "SetPrimaryPartCFrame"
-           and method ~= "Destroy"
-           and method ~= "Remove"
-           and method ~= "ClearAllChildren"
-           and method ~= "MoveTo"
-           and method ~= "ScaleTo" then
+        if method ~= "TakeDamage" and method ~= "BreakJoints" and method ~= "ChangeState"
+           and method ~= "SetStateEnabled" and method ~= "SetNetworkOwner"
+           and method ~= "PivotTo" and method ~= "SetPrimaryPartCFrame"
+           and method ~= "Destroy" and method ~= "Remove"
+           and method ~= "ClearAllChildren" and method ~= "MoveTo"
+           and method ~= "ScaleTo" and method ~= "ApplyImpulse"
+           and method ~= "ApplyAngularImpulse" then
             return oldNamecall(self, ...)
         end
 
-        if typeof(self) ~= "Instance" then
-            return oldNamecall(self, ...)
-        end
-
+        if typeof(self) ~= "Instance" then return oldNamecall(self, ...) end
         local char = player.Character
         if not char then return oldNamecall(self, ...) end
-        if self ~= char and not self:IsDescendantOf(char) then
-            return oldNamecall(self, ...)
-        end
+        if self ~= char and not self:IsDescendantOf(char) then return oldNamecall(self, ...) end
 
         if method == "Destroy" or method == "Remove" then
             if isOurBodyPart(self) then return end
@@ -162,80 +166,11 @@ pcall(function()
         end
         if method == "MoveTo" and isOurHumanoid(self) then return end
         if method == "ScaleTo" and isOurCharModel(self) then return end
+        if (method == "ApplyImpulse" or method == "ApplyAngularImpulse") and isOurBodyPart(self) then
+            return
+        end
 
         return oldNamecall(self, ...)
-    end)
-
-    mt.__newindex = newcclosure(function(t, k, v)
-        if not getgenv().AbsoluteActive then
-            return oldNewIndex(t, k, v)
-        end
-        if checkcaller and checkcaller() then
-            return oldNewIndex(t, k, v)
-        end
-        if typeof(t) ~= "Instance" then
-            return oldNewIndex(t, k, v)
-        end
-
-        local char = player.Character
-        if not char then return oldNewIndex(t, k, v) end
-        if t ~= char and not t:IsDescendantOf(char) then
-            return oldNewIndex(t, k, v)
-        end
-
-        if t:IsA("BasePart") and isOurBodyPart(t) then
-            if k == "CFrame" then return end
-            if k == "Position" then return end
-            if k == "Orientation" then return end
-            if k == "Rotation" then return end
-            if k == "AssemblyLinearVelocity" then return end
-            if k == "AssemblyAngularVelocity" then return end
-            if k == "Velocity" then return end
-            if k == "RotVelocity" then return end
-            if k == "Anchored" then return end
-            if k == "Massless" then return end
-            if k == "Mass" then return end
-            if k == "RootPriority" then return end
-            if k == "CustomPhysicalProperties" then return end
-            if k == "CanCollide" then return end
-            if k == "Size" then return end
-            if k == "Shape" then return end
-        end
-
-        if t:IsA("Humanoid") and isOurHumanoid(t) then
-            if k == "Health" then return end
-            if k == "MaxHealth" then return end
-            if k == "BreakJointsOnDeath" then return end
-            if k == "PlatformStand" then return end
-            if k == "Sit" then return end
-            if k == "JumpPower" then return end
-            if k == "JumpHeight" then return end
-            if k == "MoveDirection" then return end
-            if k == "TargetPoint" then return end
-            if k == "AutoRotate" then return end
-            if k == "HipHeight" then return end
-            if k == "EvaluateStateMachine" then return end
-            if k == "WalkSpeed" and (v == 0 or v > 500) then return end
-        end
-
-        if isOurBodyJoint(t) then
-            if k == "Parent" then return end
-            if k == "Part0" then return end
-            if k == "Part1" then return end
-            if k == "C0" then return end
-            if k == "C1" then return end
-            if k == "Transform" then return end
-            if k == "CurrentAngle" then return end
-            if k == "DesiredAngle" then return end
-            if k == "MaxVelocity" then return end
-            if k == "Enabled" and v == false then return end
-        end
-
-        if t == char then
-            if k == "PrimaryPart" then return end
-        end
-
-        return oldNewIndex(t, k, v)
     end)
 
     setreadonly(mt, true)
@@ -266,12 +201,12 @@ local function computeStartPosition()
     local vp = (camera and camera.ViewportSize) or Vector2.new(800, 600)
     local margin = 12
     local xOffset = -(PANEL_W + margin)
-    local xScale  = 1
+    local xScale = 1
     if isMobile and (PANEL_W > vp.X * 0.5) then
-        xScale  = 0.5
+        xScale = 0.5
         xOffset = -PANEL_W / 2
     end
-    local yScale  = 0.5
+    local yScale = 0.5
     local yOffset = -PANEL_H / 2
     local yAbs = yScale * vp.Y + yOffset
     if yAbs < margin then
@@ -304,12 +239,71 @@ local AFK_POSITION_TOLERANCE = 3
 local AFK_PULSE_DURATION     = 0.15
 local AFK_MAX_VEL_FOR_SNAP   = 500
 
-local AE_MAX_DELTA      = 400
-local AE_MAX_VELOCITY   = 2500
-local AE_MAX_ANGULAR    = 200
-local AE_SNAP_VELOCITY  = 1500
+local AE_SNAP_DELTA          = 25
+local AE_SNAP_UP_VELOCITY    = 200
+local AE_SNAP_HEIGHT_ABOVE   = 40
+local AE_SAFE_UPDATE_VEL_MAX = 60
+local AE_SAFE_UPDATE_WAIT    = 0.4
+local AE_SNAP_COOLDOWN       = 0.8
 
--- Track whether AE auto-enabled Immortal, and a setter for the Immortal toggle
+-- ==========================================
+-- POSITION LOCK STATE
+-- ==========================================
+local LOCK_enabled = false
+local LOCK_cframe  = nil
+local LOCK_shield  = nil
+local LOCK_forceField = nil
+
+local LOCK_SHIELD_SIZE = 6
+
+local function LOCK_createShield()
+    if not character or not rootPart then return end
+
+    if LOCK_shield and LOCK_shield.Parent then LOCK_shield:Destroy() end
+    if LOCK_forceField and LOCK_forceField.Parent then LOCK_forceField:Destroy() end
+
+    -- Primary: ForceField (invisible damage blocker — same as game spawn shield)
+    LOCK_forceField = Instance.new("ForceField")
+    LOCK_forceField.Name = "PositionLock_ForceField"
+    LOCK_forceField.Visible = false
+    LOCK_forceField.Parent = character
+
+    -- Backup: invisible CanCollide shell (blocks physical touch from objects)
+    local shell = Instance.new("Part")
+    shell.Name = "PositionLock_Shell"
+    shell.Shape = Enum.PartType.Ball
+    shell.Size = Vector3.new(LOCK_SHIELD_SIZE, LOCK_SHIELD_SIZE, LOCK_SHIELD_SIZE)
+    shell.Material = Enum.Material.ForceField
+    shell.Color = Color3.fromRGB(80, 180, 255)
+    shell.Transparency = 1
+    shell.Anchored = false
+    shell.CanCollide = false
+    shell.CanTouch = false
+    shell.CanQuery = false
+    shell.Massless = true
+    shell.CastShadow = false
+    shell.TopSurface = Enum.SurfaceType.Smooth
+    shell.BottomSurface = Enum.SurfaceType.Smooth
+    shell.Parent = character
+
+    local weld = Instance.new("Weld")
+    weld.Name = "PositionLock_ShellWeld"
+    weld.Part0 = rootPart
+    weld.Part1 = shell
+    weld.C0 = CFrame.new(0, 0, 0)
+    weld.C1 = CFrame.new(0, 0, 0)
+    weld.Parent = shell
+
+    LOCK_shield = shell
+end
+
+local function LOCK_removeShield()
+    if LOCK_shield and LOCK_shield.Parent then LOCK_shield:Destroy() end
+    if LOCK_forceField and LOCK_forceField.Parent then LOCK_forceField:Destroy() end
+    LOCK_shield = nil
+    LOCK_forceField = nil
+end
+
 local AE_autoImmortal      = false
 local immortalToggleSetter = nil
 
@@ -392,7 +386,239 @@ pcall(function()
 end)
 
 -- ==========================================
--- ANTI MONSTER — DETECTION ENGINE
+-- POSITION LOCK ENGINE
+-- ==========================================
+local function LOCK_apply()
+    if not LOCK_enabled or not LOCK_cframe then return end
+    if not character or not rootPart then return end
+
+    if not LOCK_shield or not LOCK_shield.Parent then
+        LOCK_createShield()
+    end
+
+    for _, part in ipairs(character:GetChildren()) do
+        if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
+            if not part.Anchored then
+                pcall(function() part.Anchored = true end)
+            end
+        end
+    end
+
+    local delta = (rootPart.Position - LOCK_cframe.Position).Magnitude
+    if delta > 0.1 then
+        pcall(function() rootPart.CFrame = LOCK_cframe end)
+    end
+
+    pcall(function()
+        rootPart.AssemblyLinearVelocity  = Vector3.zero
+        rootPart.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    for _, part in ipairs(character:GetChildren()) do
+        if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
+            if part.AssemblyLinearVelocity.Magnitude > 0 then
+                pcall(function()
+                    part.AssemblyLinearVelocity = Vector3.zero
+                    part.AssemblyAngularVelocity = Vector3.zero
+                end)
+            end
+        end
+    end
+end
+
+local function LOCK_release()
+    if not character then return end
+    for _, part in ipairs(character:GetChildren()) do
+        if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
+            pcall(function() part.Anchored = false end)
+        end
+    end
+    if rootPart then
+        pcall(function()
+            rootPart.AssemblyLinearVelocity  = Vector3.zero
+            rootPart.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+end
+
+-- ==========================================
+-- AE CLEANUP
+-- ==========================================
+local AE_EXCLUDED_ACTUATOR_NAMES = {
+    FlightVelocity = true,
+    FlightAttachment = true,
+    AI_SkyWalk_Vel = true,
+    AI_SkyWalk_Pos = true,
+    AI_SkyWalk_Attachment = true,
+}
+
+local function AE_isForeignActuator(d)
+    if AE_EXCLUDED_ACTUATOR_NAMES[d.Name] then return false end
+    if d:IsA("BodyMover") then return true end
+    if d:IsA("LinearVelocity") then return true end
+    if d:IsA("AngularVelocity") then return true end
+    if d:IsA("AlignPosition") then return true end
+    if d:IsA("AlignOrientation") then return true end
+    if d:IsA("VectorForce") then return true end
+    if d:IsA("Torque") then return true end
+    if d:IsA("RopeConstraint") then return true end
+    if d:IsA("RodConstraint") then return true end
+    if d:IsA("SpringConstraint") then return true end
+    return false
+end
+
+local function AE_forceCleanup()
+    if not character then return end
+    local removed = 0
+
+    pcall(function()
+        if humanoid then humanoid:UnequipTools() end
+    end)
+
+    for _, d in ipairs(character:GetDescendants()) do
+        if AE_isForeignActuator(d) then
+            d:Destroy()
+            removed = removed + 1
+        end
+    end
+
+    if player.Backpack then
+        for _, d in ipairs(player.Backpack:GetDescendants()) do
+            if AE_isForeignActuator(d) then
+                d:Destroy()
+                removed = removed + 1
+            end
+        end
+    end
+
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("RopeConstraint") or d:IsA("RodConstraint") or d:IsA("SpringConstraint") then
+            local a0 = d.Attachment0
+            local a1 = d.Attachment1
+            local a0Ours = a0 and hasBodyPartAncestor(a0)
+            local a1Ours = a1 and hasBodyPartAncestor(a1)
+            if (a0Ours and not a1Ours) or (a1Ours and not a0Ours) then
+                d:Destroy()
+                removed = removed + 1
+            end
+        end
+    end
+
+    for _, d in ipairs(character:GetDescendants()) do
+        if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
+            local p0 = d.Part0
+            local p1 = d.Part1
+            if p0 and p1 then
+                local p0Ours = isOurBodyPart(p0)
+                local p1Ours = isOurBodyPart(p1)
+                if (p0Ours and not p1Ours) or (p1Ours and not p0Ours) then
+                    local foreignPart = p0Ours and p1 or p0
+                    if foreignPart and foreignPart.Parent ~= character then
+                        d:Destroy()
+                        removed = removed + 1
+                    end
+                end
+            end
+        end
+    end
+
+    return removed
+end
+
+local function AE_hasGameActuator()
+    if not character then return false end
+    for _, d in ipairs(character:GetDescendants()) do
+        if AE_isForeignActuator(d) then return true end
+    end
+    return false
+end
+
+-- ==========================================
+-- AE RECOVERY
+-- ==========================================
+local function AE_sendMovementPulse()
+    if not humanoid or not humanoid.Parent then return end
+    task.spawn(function()
+        for i = 1, 3 do
+            pcall(function()
+                if humanoid and humanoid.Parent then
+                    humanoid:Move(Vector3.new(0.05, 0, 0.05), false)
+                end
+            end)
+            task.wait(0.1)
+            pcall(function()
+                if humanoid and humanoid.Parent then
+                    humanoid:Move(Vector3.zero, false)
+                end
+            end)
+            task.wait(0.1)
+        end
+    end)
+end
+
+local function AE_fullRecovery()
+    if not character or not humanoid or not rootPart then return end
+
+    local removed = AE_forceCleanup()
+
+    pcall(function()
+        humanoid.PlatformStand = false
+        humanoid.Sit = false
+        humanoid.BreakJointsOnDeath = false
+    end)
+
+    pcall(function()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, true)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Landed, true)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+    end)
+
+    pcall(function()
+        if rootPart.Anchored and not LOCK_enabled then rootPart.Anchored = false end
+        rootPart.AssemblyLinearVelocity = Vector3.zero
+        rootPart.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    pcall(function()
+        if rootPart:GetNetworkOwner() ~= player then
+            rootPart:SetNetworkOwner(player)
+        end
+    end)
+
+    pcall(function()
+        if humanoid.FloorMaterial ~= Enum.Material.Air then
+            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+    end)
+
+    task.delay(0.2, function()
+        if humanoid and humanoid.Parent then
+            pcall(function()
+                if humanoid.FloorMaterial ~= Enum.Material.Air then
+                    humanoid:ChangeState(Enum.HumanoidStateType.Running)
+                else
+                    humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+                end
+            end)
+        end
+    end)
+
+    AE_sendMovementPulse()
+
+    if camera and humanoid then
+        pcall(function()
+            camera.CameraSubject = humanoid
+            camera.CameraType = Enum.CameraType.Custom
+        end)
+    end
+
+    print(("[AE Recovery] Cleaned %d foreign object(s)"):format(removed))
+end
+
+-- ==========================================
+-- ANTI MONSTER
 -- ==========================================
 local function AI_nameHasAny(name, list)
     if not name then return false end
@@ -407,9 +633,7 @@ local function AI_inFriendlyContainer(model)
     local p = model.Parent
     local depth = 0
     while p and p ~= workspace and depth < 8 do
-        if AI_nameHasAny(p.Name, AI_FRIENDLY_CONTAINER_NAMES) then
-            return true
-        end
+        if AI_nameHasAny(p.Name, AI_FRIENDLY_CONTAINER_NAMES) then return true end
         p = p.Parent
         depth = depth + 1
     end
@@ -448,9 +672,7 @@ local function AI_targetsUs(model, myChar)
             local n = d.Name:lower()
             if n:find("target") or n:find("enemy") or n:find("aggro") then
                 local v = d.Value
-                if v == myChar
-                or v == myChar:FindFirstChild("Humanoid")
-                or v == myChar:FindFirstChild("HumanoidRootPart") then
+                if v == myChar or v == myChar:FindFirstChild("Humanoid") or v == myChar:FindFirstChild("HumanoidRootPart") then
                     return true
                 end
             end
@@ -483,10 +705,7 @@ local function AI_isHostile(model)
     if Players:GetPlayerFromCharacter(model) then return false end
 
     local hum = model:FindFirstChildOfClass("Humanoid")
-    if hum and (hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead) then
-        return false
-    end
-
+    if hum and (hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead) then return false end
     if AI_inFriendlyContainer(model) then return false end
 
     for _, tag in ipairs(AI_FRIENDLY_TAGS) do
@@ -496,9 +715,7 @@ local function AI_isHostile(model)
     end
 
     if AI_nameHasAny(model.Name, AI_FRIENDLY_KEYWORDS) then
-        if not AI_nameHasAny(model.Name, AI_HOSTILE_NAME_HINTS) then
-            return false
-        end
+        if not AI_nameHasAny(model.Name, AI_HOSTILE_NAME_HINTS) then return false end
     end
 
     local signals = 0
@@ -514,9 +731,7 @@ end
 local function AI_getModelPos(model)
     local ok, pivot = pcall(function() return model:GetPivot() end)
     if ok and pivot then return pivot.Position end
-    local root = model:FindFirstChild("HumanoidRootPart")
-             or model:FindFirstChild("RootPart")
-             or model:FindFirstChild("Head")
+    local root = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart") or model:FindFirstChild("Head")
     return root and root.Position or nil
 end
 
@@ -550,10 +765,8 @@ local function AI_setNoclip(state)
             if state then
                 part.CanCollide = false
             else
-                if part.Name == "HumanoidRootPart"
-                or part.Name == "UpperTorso"
-                or part.Name == "LowerTorso"
-                or part.Name == "Torso" then
+                if part.Name == "HumanoidRootPart" or part.Name == "UpperTorso"
+                or part.Name == "LowerTorso" or part.Name == "Torso" then
                     part.CanCollide = true
                 else
                     part.CanCollide = false
@@ -567,7 +780,7 @@ local function AI_startSkyWalk()
     if not character or not rootPart or not humanoid then return end
     if AI_isSkyWalking then return end
 
-    AI_groundY      = rootPart.Position.Y
+    AI_groundY = rootPart.Position.Y
     AI_isSkyWalking = true
 
     pcall(function()
@@ -576,12 +789,7 @@ local function AI_startSkyWalk()
     end)
 
     AI_setNoclip(true)
-
-    rootPart.CFrame = CFrame.new(
-        rootPart.Position.X,
-        AI_groundY + AI_HEIGHT,
-        rootPart.Position.Z
-    )
+    rootPart.CFrame = CFrame.new(rootPart.Position.X, AI_groundY + AI_HEIGHT, rootPart.Position.Z)
 
     if AI_attachment then AI_attachment:Destroy() end
     AI_attachment = Instance.new("Attachment")
@@ -590,21 +798,17 @@ local function AI_startSkyWalk()
 
     AI_linearVel = Instance.new("LinearVelocity")
     AI_linearVel.Name = "AI_SkyWalk_Vel"
-    AI_linearVel.MaxForce       = math.huge
+    AI_linearVel.MaxForce = math.huge
     AI_linearVel.VectorVelocity = Vector3.zero
-    AI_linearVel.Attachment0    = AI_attachment
-    AI_linearVel.Parent         = rootPart
+    AI_linearVel.Attachment0 = AI_attachment
+    AI_linearVel.Parent = rootPart
 
     AI_bodyPos = Instance.new("BodyPosition")
     AI_bodyPos.Name = "AI_SkyWalk_Pos"
     AI_bodyPos.MaxForce = Vector3.new(0, math.huge, 0)
     AI_bodyPos.P = 10000
     AI_bodyPos.D = 1000
-    AI_bodyPos.Position = Vector3.new(
-        rootPart.Position.X,
-        AI_groundY + AI_HEIGHT,
-        rootPart.Position.Z
-    )
+    AI_bodyPos.Position = Vector3.new(rootPart.Position.X, AI_groundY + AI_HEIGHT, rootPart.Position.Z)
     AI_bodyPos.Parent = rootPart
 
     print("[Anti Monster] LIFTING 15 STUDS")
@@ -615,17 +819,13 @@ local function AI_endSkyWalk()
     AI_isSkyWalking = false
 
     if AI_linearVel then AI_linearVel:Destroy() AI_linearVel = nil end
-    if AI_bodyPos   then AI_bodyPos:Destroy()   AI_bodyPos   = nil end
+    if AI_bodyPos then AI_bodyPos:Destroy() AI_bodyPos = nil end
     if AI_attachment then AI_attachment:Destroy() AI_attachment = nil end
 
     local rp = RaycastParams.new()
     rp.FilterDescendantsInstances = {character}
     rp.FilterType = Enum.RaycastFilterType.Exclude
-    local res = workspace:Raycast(
-        rootPart.Position + Vector3.new(0, 10, 0),
-        Vector3.new(0, -500, 0),
-        rp
-    )
+    local res = workspace:Raycast(rootPart.Position + Vector3.new(0, 10, 0), Vector3.new(0, -500, 0), rp)
     local landY = res and (res.Position.Y + 3.5) or AI_groundY
 
     rootPart.CFrame = CFrame.new(rootPart.Position.X, landY, rootPart.Position.Z)
@@ -639,7 +839,6 @@ local function AI_endSkyWalk()
 
     task.wait(0.1)
     AI_setNoclip(false)
-
     AI_lastDropTime = tick()
     print("[Anti Monster] DROPPING DOWN")
 end
@@ -653,11 +852,7 @@ local function AI_tick()
         AI_setNoclip(true)
         humanoid.PlatformStand = true
         AI_linearVel.VectorVelocity = humanoid.MoveDirection * humanoid.WalkSpeed
-        AI_bodyPos.Position = Vector3.new(
-            rootPart.Position.X,
-            AI_groundY + AI_HEIGHT,
-            rootPart.Position.Z
-        )
+        AI_bodyPos.Position = Vector3.new(rootPart.Position.X, AI_groundY + AI_HEIGHT, rootPart.Position.Z)
     end
 
     if humanoid.Health <= 0 then
@@ -665,7 +860,7 @@ local function AI_tick()
         return
     end
 
-    local myPos   = rootPart.Position
+    local myPos = rootPart.Position
     local myPosXZ = Vector3.new(myPos.X, 0, myPos.Z)
     local closest3D, closestXZ = math.huge, math.huge
 
@@ -678,9 +873,7 @@ local function AI_tick()
                     if p then
                         local d3D = (myPos - p).Magnitude
                         local dXZ = (myPosXZ - Vector3.new(p.X, 0, p.Z)).Magnitude
-                        if dXZ < closestXZ then
-                            closest3D, closestXZ = d3D, dXZ
-                        end
+                        if dXZ < closestXZ then closest3D, closestXZ = d3D, dXZ end
                     end
                 else
                     AI_registry[model] = nil
@@ -696,9 +889,7 @@ local function AI_tick()
             AI_startSkyWalk()
         end
     else
-        if closestXZ >= AI_ESCAPE_DIST then
-            AI_endSkyWalk()
-        end
+        if closestXZ >= AI_ESCAPE_DIST then AI_endSkyWalk() end
     end
 end
 
@@ -713,16 +904,11 @@ local function AI_connectRegistry()
 end
 
 local function AI_disconnectRegistry()
-    if AI_descConn then
-        AI_descConn:Disconnect()
-        AI_descConn = nil
-    end
+    if AI_descConn then AI_descConn:Disconnect() AI_descConn = nil end
 end
 
 local function AI_start()
-    if not AI_registryBuilt then
-        task.spawn(AI_scanWorkspace)
-    end
+    if not AI_registryBuilt then task.spawn(AI_scanWorkspace) end
     AI_connectRegistry()
     print("[Anti Monster] ENABLED")
 end
@@ -736,62 +922,123 @@ local function AI_stop()
 end
 
 -- ==========================================
--- ANTI EXPLOITER — JOINT SNAPSHOT
+-- ANTI EXPLOITER — SNAP-BACK ENGINE
 -- ==========================================
-local AE_jointSnapshot = {}
+local AE_safePos         = nil
+local AE_safeGroundY     = nil
+local AE_lastFramePos    = nil
+local AE_lastSnapTime    = 0
+local AE_suspicionTime   = 0
+local AE_ownerCounter    = 0
 
-local function AE_snapshotJoints()
-    AE_jointSnapshot = {}
-    if not character then return end
-    for _, d in ipairs(character:GetDescendants()) do
-        if isOurBodyJoint(d) then
-            AE_jointSnapshot[d.Name] = {
-                Class = d.ClassName,
-                Part0 = d.Part0, Part1 = d.Part1,
-                C0 = d.C0, C1 = d.C1,
-                Parent = d.Parent,
-            }
-        end
-    end
+local function AE_canGuard()
+    if not getgenv().AntiExploitActive then return false end
+    if getgenv().NoclipActive or isTeleporting or AI_isSkyWalking then return false end
+    if isFlying then return false end
+    if AE_hasGameActuator() then return false end
+    return true
 end
 
-local function AE_verifyJoints()
-    if not character then return end
-    local seen = {}
-    for _, d in ipairs(character:GetDescendants()) do
-        if d:IsA("Motor6D") and isOurBodyJoint(d) then
-            seen[d.Name] = true
-            local snap = AE_jointSnapshot[d.Name]
-            if snap then
-                if d.Part0 ~= snap.Part0 and snap.Part0 and snap.Part0.Parent == character then
-                    d.Part0 = snap.Part0
-                end
-                if d.Part1 ~= snap.Part1 and snap.Part1 and snap.Part1.Parent == character then
-                    d.Part1 = snap.Part1
-                end
-                if d.C0 ~= snap.C0 then d.C0 = snap.C0 end
-                if d.C1 ~= snap.C1 then d.C1 = snap.C1 end
-                if not d.Enabled then d.Enabled = true end
-            end
+local function AE_snapBack(reason)
+    if not rootPart or not AE_safePos then return end
+    if LOCK_enabled then return end
+    if tick() - AE_lastSnapTime < AE_SNAP_COOLDOWN then return end
+
+    local rot = rootPart.CFrame - rootPart.CFrame.Position
+    rootPart.CFrame = CFrame.new(AE_safePos) * rot
+    rootPart.AssemblyLinearVelocity  = Vector3.zero
+    rootPart.AssemblyAngularVelocity = Vector3.zero
+
+    AE_lastFramePos = rootPart.Position
+    AE_lastSnapTime = tick()
+    AE_suspicionTime = tick()
+
+    print(("[AE Snap-back] %s — returned to safe spot"):format(reason or "attack"))
+end
+
+local function AE_guardPhysics()
+    if not AE_canGuard() then
+        AE_lastFramePos = rootPart.Position
+        return
+    end
+
+    local pos = rootPart.Position
+    local vel = rootPart.AssemblyLinearVelocity
+
+    local suspicious = false
+    local reason = nil
+
+    if AE_lastFramePos then
+        local delta = (pos - AE_lastFramePos).Magnitude
+        if delta > AE_SNAP_DELTA then
+            suspicious = true
+            reason = ("teleport (%.0f studs)"):format(delta)
         end
     end
-    for name, snap in pairs(AE_jointSnapshot) do
-        if not seen[name]
-        and snap.Part0 and snap.Part0.Parent == character
-        and snap.Part1 and snap.Part1.Parent == character then
-            local j = Instance.new(snap.Class or "Motor6D")
-            j.Name = name
-            j.Part0 = snap.Part0
-            j.Part1 = snap.Part1
-            j.C0 = snap.C0
-            j.C1 = snap.C1
-            j.Parent = snap.Parent or snap.Part1
+
+    if not suspicious and vel.Y > AE_SNAP_UP_VELOCITY then
+        suspicious = true
+        reason = ("sky fling (%.0f studs/s up)"):format(vel.Y)
+    end
+
+    if not suspicious and AE_safeGroundY and pos.Y > AE_safeGroundY + AE_SNAP_HEIGHT_ABOVE then
+        suspicious = true
+        reason = ("%.0f studs above ground"):format(pos.Y - AE_safeGroundY)
+    end
+
+    if suspicious then
+        AE_snapBack(reason)
+        return
+    end
+
+    local calm = vel.Magnitude < AE_SAFE_UPDATE_VEL_MAX
+    if calm and (tick() - AE_suspicionTime) > AE_SAFE_UPDATE_WAIT then
+        AE_safePos = pos
+        if humanoid.FloorMaterial ~= Enum.Material.Air then
+            AE_safeGroundY = pos.Y
         end
+    end
+
+    if vel.Magnitude > 2500 then
+        rootPart.AssemblyLinearVelocity = Vector3.zero
+    end
+    if rootPart.AssemblyAngularVelocity.Magnitude > 200 then
+        rootPart.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    AE_lastFramePos = rootPart.Position
+end
+
+local function AE_enforceState()
+    if not getgenv().AntiExploitActive then return end
+    if getgenv().NoclipActive or AI_isSkyWalking then return end
+    if humanoid.BreakJointsOnDeath then humanoid.BreakJointsOnDeath = false end
+    if humanoid.PlatformStand then humanoid.PlatformStand = false end
+    if humanoid.Sit then humanoid.Sit = false end
+
+    if rootPart.Anchored and not AE_hasGameActuator() and not isTeleporting and not LOCK_enabled then
+        rootPart.Anchored = false
+    end
+
+    local st = humanoid:GetState()
+    if st == Enum.HumanoidStateType.Physics
+    or st == Enum.HumanoidStateType.Ragdoll
+    or st == Enum.HumanoidStateType.FallingDown then
+        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
     end
 end
 
 local function AE_reclaimOwnership()
     if not rootPart then return end
+    if LOCK_enabled then return end
+    if rootPart.AssemblyLinearVelocity.Magnitude > 80 then return end
+    if AE_hasGameActuator() then return end
+    local st = humanoid and humanoid:GetState()
+    if st == Enum.HumanoidStateType.Freefall
+    or st == Enum.HumanoidStateType.Physics
+    or st == Enum.HumanoidStateType.Climbing then
+        return
+    end
     pcall(function()
         if rootPart:GetNetworkOwner() ~= player then
             rootPart:SetNetworkOwner(player)
@@ -805,7 +1052,7 @@ end
 local function AFK_tick()
     if not afkStreakEnabled then return end
     if not character or not rootPart or not humanoid then return end
-    if isFlying or isTeleporting or AI_isSkyWalking then
+    if isFlying or isTeleporting or AI_isSkyWalking or LOCK_enabled then
         AFK_lockedPosition = rootPart.Position
         return
     end
@@ -824,7 +1071,7 @@ local function AFK_tick()
         if delta > AFK_POSITION_TOLERANCE then
             local rot = rootPart.CFrame - rootPart.CFrame.Position
             rootPart.CFrame = CFrame.new(AFK_lockedPosition) * rot
-            rootPart.AssemblyLinearVelocity  = Vector3.zero
+            rootPart.AssemblyLinearVelocity = Vector3.zero
             rootPart.AssemblyAngularVelocity = Vector3.zero
         else
             AFK_lockedPosition = rootPart.Position
@@ -856,9 +1103,7 @@ local function immortal_apply()
         if humanoid.Health < IMMORTAL_TARGET_HP then humanoid.Health = IMMORTAL_TARGET_HP end
         humanoid.BreakJointsOnDeath = false
     end)
-    pcall(function()
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-    end)
+    pcall(function() humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false) end)
 end
 
 local function immortal_regen()
@@ -985,9 +1230,9 @@ do
     local function beginDrag(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch then
-            dragging   = true
-            dragStart  = input.Position
-            startPos   = mainFrame.Position
+            dragging = true
+            dragStart = input.Position
+            startPos = mainFrame.Position
         end
     end
     local function moveDrag(input)
@@ -1020,12 +1265,11 @@ toggleContainer.Size = UDim2.new(1, 0, 1, -45)
 toggleContainer.Position = UDim2.new(0, 0, 0, 45)
 toggleContainer.BackgroundTransparency = 1
 toggleContainer.BorderSizePixel = 0
-toggleContainer.CanvasSize = UDim2.new(0, 0, 0, 720)
+toggleContainer.CanvasSize = UDim2.new(0, 0, 0, 780)
 toggleContainer.ScrollBarThickness = 6
 toggleContainer.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 75)
 toggleContainer.Parent = mainFrame
 
--- Toggle row builder that returns a setter so external code can flip the visual
 local function createToggleRow(name, yPos, callback, defaultOn)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(0.9, 0, 0, 32)
@@ -1143,9 +1387,6 @@ local function createActionButton(name, yPos, color, callback)
     return btn
 end
 
--- ==========================================
--- TELEPORT / FLYING
--- ==========================================
 local function absoluteTeleport(targetCFrame)
     if not character or not rootPart then return end
     isTeleporting = true
@@ -1153,15 +1394,15 @@ local function absoluteTeleport(targetCFrame)
         humanoid.Sit = false
         pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
     end
-    rootPart.AssemblyLinearVelocity  = Vector3.zero
+    rootPart.AssemblyLinearVelocity = Vector3.zero
     rootPart.AssemblyAngularVelocity = Vector3.zero
     rootPart.Anchored = true
     character:PivotTo(targetCFrame + Vector3.new(0, 3, 0))
     task.delay(0.06, function()
         if rootPart and rootPart.Parent then
-            rootPart.AssemblyLinearVelocity  = Vector3.zero
+            rootPart.AssemblyLinearVelocity = Vector3.zero
             rootPart.AssemblyAngularVelocity = Vector3.zero
-            rootPart.Anchored = false
+            if not LOCK_enabled then rootPart.Anchored = false end
         end
         if humanoid and humanoid.Parent then
             pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
@@ -1181,6 +1422,7 @@ end
 
 local function setFlying(state)
     if not rootPart or not humanoid or not linearVelocity then return end
+    if LOCK_enabled then return end
     isFlying = state
     if isFlying then
         linearVelocity.MaxForce = 100000
@@ -1202,7 +1444,6 @@ createToggleRow("Flight Mode", 5, function(state)
     if not state then setFlying(false) end
 end)
 
--- Immortal Mode captures its own setter so Anti Exploiter can flip it visually
 local _, immortalSetVisual = createToggleRow("Immortal Mode", 40, function(state)
     godModeEnabled = state
     getgenv().ImmortalActive = state
@@ -1268,15 +1509,11 @@ createInputRow("Run Speed Value", 250, 50, function(value)
     runSpeedValue = value
 end)
 
--- ==========================================
--- ANTI EXPLOITER (turns off cleanly)
--- ==========================================
 createToggleRow("🛡 Anti Exploiter", 285, function(state)
     getgenv().AbsoluteActive = state
     getgenv().AntiExploitActive = state
 
     if state then
-        -- Auto-enable Immortal if it's currently off, and remember we did so
         if not getgenv().ImmortalActive then
             godModeEnabled = true
             getgenv().ImmortalActive = true
@@ -1288,14 +1525,13 @@ createToggleRow("🛡 Anti Exploiter", 285, function(state)
             AE_autoImmortal = false
         end
 
-        task.defer(function()
-            task.wait(0.2)
-            AE_snapshotJoints()
-        end)
-        AE_lastPos = rootPart and rootPart.Position or nil
+        AE_safePos        = rootPart and rootPart.Position or nil
+        AE_safeGroundY    = rootPart and rootPart.Position.Y or nil
+        AE_lastFramePos   = rootPart and rootPart.Position or nil
+        AE_suspicionTime  = tick()
+
         print("[Anti Exploiter] ENABLED")
     else
-        -- If we auto-enabled Immortal, turn it back off
         if AE_autoImmortal then
             AE_autoImmortal = false
             godModeEnabled = false
@@ -1309,23 +1545,60 @@ createToggleRow("🛡 Anti Exploiter", 285, function(state)
             if immortalToggleSetter then immortalToggleSetter(false, true) end
         end
 
-        -- Clear cached state so next enable starts clean
-        AE_lastPos = nil
-        AE_jointSnapshot = {}
-        print("[Anti Exploiter] DISABLED")
+        AE_safePos = nil
+        AE_safeGroundY = nil
+        AE_lastFramePos = nil
+
+        AE_fullRecovery()
+        task.delay(0.5, function()
+            if character and humanoid and humanoid.Parent then pcall(AE_fullRecovery) end
+        end)
+        task.delay(1.0, function()
+            if character and humanoid and humanoid.Parent then pcall(AE_fullRecovery) end
+        end)
+
+        print("[Anti Exploiter] DISABLED (recovered)")
     end
 end)
 
-createToggleRow("👾 Anti Monster", 320, function(state)
-    getgenv().AISkyWalkActive = state
+createToggleRow("🔒 Position Lock", 320, function(state)
+    getgenv().PositionLockActive = state
     if state then
-        AI_start()
+        if not rootPart then return end
+        LOCK_cframe = rootPart.CFrame
+        LOCK_enabled = true
+
+        pcall(function()
+            humanoid.PlatformStand = false
+            humanoid.Sit = false
+            if humanoid.FloorMaterial ~= Enum.Material.Air then
+                humanoid:ChangeState(Enum.HumanoidStateType.Running)
+            end
+        end)
+
+        LOCK_apply()
+        LOCK_createShield()
+
+        print(("[Position Lock] LOCKED at X=%.1f Y=%.1f Z=%.1f | 🛡 Invisible shield active"):format(
+            LOCK_cframe.Position.X,
+            LOCK_cframe.Position.Y,
+            LOCK_cframe.Position.Z
+        ))
     else
-        AI_stop()
+        LOCK_enabled = false
+        LOCK_release()
+        LOCK_removeShield()
+        LOCK_cframe = nil
+        print("[Position Lock] UNLOCKED — shield removed")
     end
 end)
 
-createToggleRow("🌙 AFK Streak", 355, function(state)
+createToggleRow("👾 Anti Monster", 355, function(state)
+    getgenv().AISkyWalkActive = state
+    if state then AI_start() else AI_stop() end
+end)
+
+createToggleRow("🌙 AFK Streak", 390, function(state)
     afkStreakEnabled = state
     getgenv().AFKStreakActive = state
     if state then
@@ -1338,26 +1611,50 @@ createToggleRow("🌙 AFK Streak", 355, function(state)
     end
 end)
 
-createActionButton("TP to Entry Spawn", 392, Color3.fromRGB(41, 128, 185), function()
+-- ==========================================
+-- ACTION BUTTONS
+-- ==========================================
+createActionButton("TP to Entry Spawn", 427, Color3.fromRGB(41, 128, 185), function()
+    AE_forceCleanup()
+    task.wait(0.05)
     absoluteTeleport(getEntrySpawn())
+    if rootPart then
+        AE_safePos = rootPart.Position
+        AE_safeGroundY = rootPart.Position.Y
+        AE_lastFramePos = rootPart.Position
+        AFK_lockedPosition = rootPart.Position
+        if LOCK_enabled then LOCK_cframe = rootPart.CFrame end
+    end
 end)
 
-local saveMapButton = createActionButton("Save Current Map Location", 429, Color3.fromRGB(142, 68, 173), function()
+local saveMapButton = createActionButton("Save Current Map Location", 464, Color3.fromRGB(142, 68, 173), function()
     if not rootPart then return end
     savedMapCFrame = rootPart.CFrame
     saveMapButton.Text = "Map Location Saved!"
     task.delay(1.5, function() saveMapButton.Text = "Save Current Map Location" end)
 end)
 
-local tpMapButton = createActionButton("TP to Saved Map Location", 466, Color3.fromRGB(39, 174, 96), function()
+local tpMapButton = createActionButton("TP to Saved Map Location", 501, Color3.fromRGB(39, 174, 96), function()
     if savedMapCFrame then
+        AE_forceCleanup()
+        task.wait(0.05)
         absoluteTeleport(savedMapCFrame)
+        if rootPart then
+            AE_safePos = rootPart.Position
+            AE_safeGroundY = rootPart.Position.Y
+            AE_lastFramePos = rootPart.Position
+            AFK_lockedPosition = rootPart.Position
+            if LOCK_enabled then LOCK_cframe = rootPart.CFrame end
+        end
     else
         tpMapButton.Text = "No Location Saved Yet!"
         task.delay(1.5, function() tpMapButton.Text = "TP to Saved Map Location" end)
     end
 end)
 
+-- ==========================================
+-- MINIMIZE
+-- ==========================================
 minimizeButton.MouseButton1Click:Connect(function()
     isMinimized = not isMinimized
     if isMinimized then
@@ -1393,8 +1690,12 @@ minimizeButton.MouseButton1Click:Connect(function()
     end
 end)
 
+-- ==========================================
+-- FLIGHT / JUMP TAP
+-- ==========================================
 local function handleJumpTap()
     if not flyToggleEnabled then return end
+    if LOCK_enabled then return end
     local currentTime = os.clock()
     if (currentTime - lastJumpTapTime) <= DOUBLE_TAP_WINDOW then
         if isFlying then setFlying(false)
@@ -1413,57 +1714,6 @@ UserInputService.JumpRequest:Connect(function()
     if (currentTime - lastJumpReqTime) > 0.1 then handleJumpTap() end
     lastJumpReqTime = currentTime
 end)
-
--- ==========================================
--- ANTI EXPLOITER — FRAME-LEVEL
--- ==========================================
-local AE_lastPos        = nil
-local AE_lastSnapTime   = 0
-local AE_jointCounter   = 0
-local AE_ownerCounter   = 0
-
-local function AE_guardPhysics()
-    if not getgenv().AntiExploitActive then return end
-    if getgenv().NoclipActive or isTeleporting or AI_isSkyWalking then
-        AE_lastPos = rootPart.Position
-        return
-    end
-    local pos = rootPart.Position
-    local vel = rootPart.AssemblyLinearVelocity
-    if AE_lastPos then
-        local delta = (pos - AE_lastPos).Magnitude
-        if delta > AE_MAX_DELTA
-           and vel.Magnitude > AE_SNAP_VELOCITY
-           and (tick() - AE_lastSnapTime) > 1.5 then
-            rootPart.CFrame = CFrame.new(AE_lastPos)
-            rootPart.AssemblyLinearVelocity  = Vector3.zero
-            rootPart.AssemblyAngularVelocity = Vector3.zero
-            AE_lastSnapTime = tick()
-            return
-        end
-    end
-    if vel.Magnitude > AE_MAX_VELOCITY then
-        rootPart.AssemblyLinearVelocity = Vector3.zero
-    end
-    if rootPart.AssemblyAngularVelocity.Magnitude > AE_MAX_ANGULAR then
-        rootPart.AssemblyAngularVelocity = Vector3.zero
-    end
-    AE_lastPos = rootPart.Position
-end
-
-local function AE_enforceState()
-    if not getgenv().AntiExploitActive then return end
-    if getgenv().NoclipActive or AI_isSkyWalking then return end
-    if humanoid.BreakJointsOnDeath then humanoid.BreakJointsOnDeath = false end
-    if humanoid.PlatformStand then humanoid.PlatformStand = false end
-    if humanoid.Sit then humanoid.Sit = false end
-    local st = humanoid:GetState()
-    if st == Enum.HumanoidStateType.Physics
-    or st == Enum.HumanoidStateType.Ragdoll
-    or st == Enum.HumanoidStateType.FallingDown then
-        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
-    end
-end
 
 -- ==========================================
 -- CHARACTER SETUP
@@ -1493,7 +1743,10 @@ local function setupCharacter(ch)
     linearVelocity.Parent = rootPart
 
     lastAirborneTime = 0
-    AE_lastPos = rootPart.Position
+    AE_safePos = rootPart.Position
+    AE_safeGroundY = rootPart.Position.Y
+    AE_lastFramePos = rootPart.Position
+    AE_suspicionTime = tick()
     AFK_lockedPosition = rootPart.Position
     AFK_lastActivity = tick()
 
@@ -1501,20 +1754,22 @@ local function setupCharacter(ch)
     fall_hookHumanoid(humanoid)
 
     if getgenv().ImmortalActive then immortal_apply() end
-    if getgenv().AbsoluteActive then
-        task.defer(function()
-            task.wait(0.5)
-            AE_snapshotJoints()
-        end)
-    end
 
     humanoid:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+        if LOCK_enabled then
+            humanoid.PlatformStand = false
+            return
+        end
         if (antiFlingEnabled or getgenv().AbsoluteActive) and humanoid.PlatformStand
            and not AI_isSkyWalking then
             humanoid.PlatformStand = false
         end
     end)
     humanoid:GetPropertyChangedSignal("Sit"):Connect(function()
+        if LOCK_enabled then
+            humanoid.Sit = false
+            return
+        end
         if (antiFlingEnabled or getgenv().AbsoluteActive) and humanoid.Sit
            and not AI_isSkyWalking then
             humanoid.Sit = false
@@ -1535,7 +1790,7 @@ local function setupCharacter(ch)
         end)
     end
 
-    if flyToggleEnabled then setFlying(true) end
+    if flyToggleEnabled and not LOCK_enabled then setFlying(true) end
 end
 
 setupCharacter(player.Character or player.CharacterAdded:Wait())
@@ -1543,6 +1798,11 @@ player.CharacterAdded:Connect(function(newChar)
     if linearVelocity then linearVelocity.MaxForce = 0 end
     task.wait(0.3)
     setupCharacter(newChar)
+    if LOCK_enabled and rootPart then
+        LOCK_cframe = rootPart.CFrame
+        LOCK_apply()
+        LOCK_createShield()
+    end
 end)
 
 -- ==========================================
@@ -1550,6 +1810,11 @@ end)
 -- ==========================================
 RunService.Stepped:Connect(function()
     if not character or not rootPart or not humanoid then return end
+
+    if LOCK_enabled then
+        LOCK_apply()
+        return
+    end
 
     if getgenv().NoclipActive then
         if rootPart.Anchored then rootPart.Anchored = false end
@@ -1564,7 +1829,8 @@ RunService.Stepped:Connect(function()
     if rootPart.Position.Y < -50 then absoluteTeleport(getEntrySpawn()) end
 
     if antiFlingEnabled and not isTeleporting and not isFlying
-       and not getgenv().NoclipActive and not AI_isSkyWalking then
+       and not getgenv().NoclipActive and not AI_isSkyWalking
+       and not AE_hasGameActuator() then
         local vel = rootPart.AssemblyLinearVelocity
         if vel.Magnitude > MAX_SPEED then
             rootPart.AssemblyLinearVelocity = vel:Lerp(vel.Unit * MAX_SPEED, SMOOTHING_FACTOR)
@@ -1582,6 +1848,13 @@ RunService.RenderStepped:Connect(function()
         return
     end
     if not character or not rootPart or not humanoid then return end
+
+    if LOCK_enabled then
+        if camera.CameraSubject ~= humanoid then
+            pcall(function() camera.CameraSubject = humanoid end)
+        end
+        return
+    end
 
     if isFlying and linearVelocity then
         if humanoid.FloorMaterial ~= Enum.Material.Air then
@@ -1617,18 +1890,18 @@ end)
 RunService.Heartbeat:Connect(function()
     if not character or not character.Parent or not rootPart or not humanoid then return end
 
+    if LOCK_enabled then
+        LOCK_apply()
+        if getgenv().ImmortalActive then immortal_regen() end
+        return
+    end
+
     if getgenv().AntiExploitActive then
         AE_guardPhysics()
         AE_enforceState()
 
-        AE_jointCounter = AE_jointCounter + 1
-        if AE_jointCounter >= 6 then
-            AE_jointCounter = 0
-            AE_verifyJoints()
-        end
-
         AE_ownerCounter = AE_ownerCounter + 1
-        if AE_ownerCounter >= 18 then
+        if AE_ownerCounter >= 60 then
             AE_ownerCounter = 0
             AE_reclaimOwnership()
         end
@@ -1640,12 +1913,12 @@ RunService.Heartbeat:Connect(function()
 end)
 
 print("=========================================")
-print("GR33D — Anti Exploiter Toggle Fix Applied")
-print("  🛡 Anti Exploiter — turns off cleanly")
-print("     • Disables metatable protection")
-print("     • Turns off auto-enabled Immortal Mode")
-print("     • Visually flips Immortal toggle back off")
-print("     • Clears joint snapshot cache")
-print("  👾 Anti Monster — full detection engine")
+print("GR33D — FULL PANEL LOADED")
+print("  🛡 Anti Exploiter — snap-back + cleanup")
+print("  🔒 Position Lock — invisible shield + freeze")
+print("  💀 Immortal Mode — 100k HP + regen")
+print("  🪂 No Fall Damage")
+print("  👾 Anti Monster — 15 stud lift")
 print("  🌙 AFK Streak — position lock")
+print("  ✈️ Flight / Noclip / Speed / TP")
 print("=========================================")
