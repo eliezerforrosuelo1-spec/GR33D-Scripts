@@ -1,6 +1,6 @@
 -- ==========================================
--- GR33D PANEL — OPTIMIZED UI + WORKING ABSOLUTE DEFENSE
--- Pet/Tool bug fixed: only real body parts are protected
+-- GR33D PANEL — SMART DETECTION BUILD
+-- Grapple-safe: only catches real flings
 -- ==========================================
 getgenv().NoclipActive         = false
 getgenv().AntiFlingActive      = false
@@ -10,224 +10,6 @@ getgenv().AISkyWalkActive      = false
 getgenv().ImmortalActive       = false
 getgenv().NoFallDamageActive   = false
 
--- ==========================================
--- UTILITY
--- ==========================================
-local function isOurChar(inst)
-    local char = game.Players.LocalPlayer.Character
-    if not char then return false end
-    if typeof(inst) ~= "Instance" then return false end
-    return inst == char or inst:IsDescendantOf(char)
-end
-
-local function isJoint(inst)
-    if typeof(inst) ~= "Instance" then return false end
-    return inst:IsA("Motor6D") or inst:IsA("Weld") or inst:IsA("WeldConstraint") or inst:IsA("Snap")
-end
-
--- ===== BODY-PART-ONLY PROTECTION =====
--- Real rig part names (R6 + R15 + HRP)
-local BODY_PART_NAMES = {
-    HumanoidRootPart = true, Head = true,
-    UpperTorso = true, LowerTorso = true,
-    LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
-    RightUpperArm = true, RightLowerArm = true, RightHand = true,
-    LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
-    RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
-    Torso = true, ["Left Arm"] = true, ["Right Arm"] = true,
-    ["Left Leg"] = true, ["Right Leg"] = true,
-}
-
--- Returns true ONLY for real rig body parts (never pets/tools/accessories)
-local function isOurBodyPart(inst)
-    if typeof(inst) ~= "Instance" or not inst:IsA("BasePart") then return false end
-    local char = game.Players.LocalPlayer.Character
-    if not char then return false end
-    if not inst:IsDescendantOf(char) then return false end
-    if BODY_PART_NAMES[inst.Name] then return true end
-    -- Fallback for custom rigs: direct child of character that has a Motor6D
-    if inst.Parent == char and inst:FindFirstChildOfClass("Motor6D") then return true end
-    return false
-end
-
--- Only body joints (a joint whose Part0 or Part1 is one of our body parts)
-local function isOurBodyJoint(inst)
-    if typeof(inst) ~= "Instance" or not isJoint(inst) then return false end
-    local char = game.Players.LocalPlayer.Character
-    if not char then return false end
-    if not inst:IsDescendantOf(char) then return false end
-    if inst.Part0 and isOurBodyPart(inst.Part0) then return true end
-    if inst.Part1 and isOurBodyPart(inst.Part1) then return true end
-    return false
-end
-
--- ==========================================
--- METATABLE LOCKDOWN — BODY-ONLY VERSION
--- ==========================================
-pcall(function()
-    local mt = getrawmetatable(game)
-    setreadonly(mt, false)
-
-    local oldNamecall = mt.__namecall
-    local oldNewIndex = mt.__newindex
-
-    mt.__namecall = newcclosure(function(self, ...)
-        local method = getnamecallmethod()
-
-        if not checkcaller() then
-            if (method == "Kick" or method == "kick") and self == game.Players.LocalPlayer then
-                warn("[Absolute] Blocked Kick.")
-                return
-            end
-
-            if getgenv().AbsoluteActive then
-                if (method == "Destroy" or method == "Remove" or method == "ClearAllChildren") then
-                    if typeof(self) == "Instance" then
-                        if isOurBodyPart(self) or isOurBodyJoint(self) then
-                            warn("[Absolute] Blocked Destroy on", self.Name)
-                            return
-                        end
-                        if self:IsA("Humanoid") and isOurChar(self) then
-                            warn("[Absolute] Blocked Humanoid Destroy.")
-                            return
-                        end
-                        if self:IsA("Model") and self == game.Players.LocalPlayer.Character then
-                            if method ~= "ClearAllChildren" then
-                                warn("[Absolute] Blocked character Destroy.")
-                                return
-                            end
-                        end
-                    end
-                end
-
-                if method == "BreakJoints" and typeof(self) == "Instance" then
-                    if self:IsA("Model") and self == game.Players.LocalPlayer.Character then
-                        warn("[Absolute] Blocked BreakJoints.")
-                        return
-                    end
-                end
-
-                if method == "TakeDamage" and typeof(self) == "Instance" and self:IsA("Humanoid") and isOurChar(self) then
-                    warn("[Absolute] Blocked TakeDamage.")
-                    return
-                end
-
-                if method == "ChangeState" and typeof(self) == "Instance" and self:IsA("Humanoid") and isOurChar(self) then
-                    local state = ...
-                    if state == Enum.HumanoidStateType.Dead
-                       or state == Enum.HumanoidStateType.Ragdoll
-                       or state == Enum.HumanoidStateType.Physics
-                       or state == Enum.HumanoidStateType.PlatformStanding
-                       or state == Enum.HumanoidStateType.FallingDown then
-                        warn("[Absolute] Blocked ChangeState to", tostring(state))
-                        return
-                    end
-                end
-
-                if method == "SetStateEnabled" and typeof(self) == "Instance" and self:IsA("Humanoid") and isOurChar(self) then
-                    local state, enabled = ...
-                    if enabled and (state == Enum.HumanoidStateType.Dead
-                                     or state == Enum.HumanoidStateType.Ragdoll
-                                     or state == Enum.HumanoidStateType.Physics
-                                     or state == Enum.HumanoidStateType.PlatformStanding
-                                     or state == Enum.HumanoidStateType.FallingDown) then
-                        return
-                    end
-                end
-
-                if method == "SetNetworkOwner" and typeof(self) == "Instance" and isOurBodyPart(self) then
-                    local target = ...
-                    if target ~= game.Players.LocalPlayer and target ~= nil then
-                        warn("[Absolute] Blocked SetNetworkOwner theft.")
-                        return
-                    end
-                end
-
-                if (method == "PivotTo" or method == "SetPrimaryPartCFrame") and typeof(self) == "Instance" then
-                    if self:IsA("Model") and self == game.Players.LocalPlayer.Character then
-                        warn("[Absolute] Blocked PivotTo.")
-                        return
-                    end
-                end
-            end
-        end
-
-        return oldNamecall(self, ...)
-    end)
-
-    mt.__newindex = newcclosure(function(t, k, v)
-        if not checkcaller() and typeof(t) == "Instance" then
-            -- BasePart protection — ONLY real body parts
-            if t:IsA("BasePart") and isOurBodyPart(t) then
-                if getgenv().AbsoluteActive then
-                    if k == "Anchored" then return end
-                    if k == "CFrame" then return end
-                    if k == "Position" then return end
-                    if k == "Orientation" then return end
-                    if k == "AssemblyLinearVelocity" then return end
-                    if k == "AssemblyAngularVelocity" then return end
-                    if k == "Velocity" then return end
-                    if k == "RotVelocity" then return end
-                    if k == "Massless" then return end
-                    if k == "CustomPhysicalProperties" then return end
-                    if k == "CanCollide" and not getgenv().NoclipActive then return end
-                end
-
-                if (getgenv().NoclipActive or getgenv().AntiFlingActive)
-                   and k == "Anchored" and v == true then
-                    return
-                end
-            end
-
-            -- Humanoid protection — only OUR humanoid
-            if t:IsA("Humanoid") and isOurChar(t) then
-                if getgenv().AbsoluteActive or getgenv().ImmortalActive then
-                    if k == "Health" then return end
-                    if k == "MaxHealth" then return end
-                    if k == "PlatformStand" then return end
-                    if k == "Sit" then return end
-                    if k == "JumpPower" then return end
-                    if k == "JumpHeight" then return end
-                    if k == "MoveDirection" then return end
-                    if k == "TargetPoint" then return end
-                    if k == "WalkSpeed" then
-                        if v == 0 or v > 500 then return end
-                    end
-                end
-                if getgenv().NoFallDamageActive and k == "FallDamage" and v > 0 then
-                    return
-                end
-            end
-
-            -- Joint protection — only joints between OUR body parts
-            if isOurBodyJoint(t) then
-                if getgenv().AbsoluteActive or getgenv().AntiFlingActive then
-                    if k == "Parent" then return end
-                    if k == "Part0" then return end
-                    if k == "Part1" then return end
-                    if k == "C0" then return end
-                    if k == "C1" then return end
-                    if k == "Enabled" and v == false then return end
-                end
-            end
-
-            -- Character model protection
-            if t:IsA("Model") and t == game.Players.LocalPlayer.Character then
-                if getgenv().AbsoluteActive then
-                    if k == "PrimaryPart" then return end
-                end
-            end
-        end
-
-        return oldNewIndex(t, k, v)
-    end)
-
-    setreadonly(mt, true)
-end)
-
--- ==========================================
--- SERVICES
--- ==========================================
 local UserInputService    = game:GetService("UserInputService")
 local RunService          = game:GetService("RunService")
 local Players             = game:GetService("Players")
@@ -242,7 +24,115 @@ end
 local camera = workspace.CurrentCamera
 
 -- ==========================================
--- MOBILE-FIT UI SIZING
+-- STRICT TARGET CHECKS
+-- ==========================================
+local BODY_PART_NAMES = {
+    HumanoidRootPart = true, Head = true,
+    UpperTorso = true, LowerTorso = true,
+    LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
+    RightUpperArm = true, RightLowerArm = true, RightHand = true,
+    LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
+    RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
+    Torso = true, ["Left Arm"] = true, ["Right Arm"] = true,
+    ["Left Leg"] = true, ["Right Leg"] = true,
+}
+
+local function isOurBodyPart(inst)
+    if typeof(inst) ~= "Instance" or not inst:IsA("BasePart") then return false end
+    local char = player.Character
+    if not char then return false end
+    if inst.Parent ~= char then return false end
+    if BODY_PART_NAMES[inst.Name] then return true end
+    return false
+end
+
+local function isOurHumanoid(inst)
+    if typeof(inst) ~= "Instance" or not inst:IsA("Humanoid") then return false end
+    local char = player.Character
+    if not char then return false end
+    return char:FindFirstChildOfClass("Humanoid") == inst
+end
+
+local function isOurCharModel(inst)
+    return typeof(inst) == "Instance" and inst == player.Character
+end
+
+-- ==========================================
+-- METATABLE HOOK — ULTRA LIGHTWEIGHT
+-- ==========================================
+pcall(function()
+    local mt = getrawmetatable(game)
+    if not mt then return end
+    setreadonly(mt, false)
+    local oldNamecall = mt.__namecall
+
+    mt.__namecall = newcclosure(function(self, ...)
+        if not getgenv().AbsoluteActive then
+            return oldNamecall(self, ...)
+        end
+
+        if checkcaller and checkcaller() then
+            return oldNamecall(self, ...)
+        end
+
+        local method = getnamecallmethod()
+
+        if method == "Kick" or method == "kick" then
+            if self == player then return end
+            return oldNamecall(self, ...)
+        end
+
+        if method ~= "TakeDamage"
+           and method ~= "BreakJoints"
+           and method ~= "ChangeState"
+           and method ~= "SetNetworkOwner"
+           and method ~= "PivotTo"
+           and method ~= "SetPrimaryPartCFrame"
+           and method ~= "Destroy"
+           and method ~= "Remove" then
+            return oldNamecall(self, ...)
+        end
+
+        if typeof(self) ~= "Instance" then
+            return oldNamecall(self, ...)
+        end
+
+        if method == "Destroy" or method == "Remove" then
+            if isOurBodyPart(self) then return end
+            if isOurHumanoid(self) then return end
+            if isOurCharModel(self) then return end
+        elseif method == "BreakJoints" then
+            if isOurCharModel(self) then return end
+        elseif method == "TakeDamage" then
+            if isOurHumanoid(self) then return end
+        elseif method == "ChangeState" then
+            if isOurHumanoid(self) then
+                local state = ...
+                if state == Enum.HumanoidStateType.Dead
+                or state == Enum.HumanoidStateType.Ragdoll
+                or state == Enum.HumanoidStateType.Physics
+                or state == Enum.HumanoidStateType.PlatformStanding
+                or state == Enum.HumanoidStateType.FallingDown then
+                    return
+                end
+            end
+        elseif method == "SetNetworkOwner" then
+            if isOurBodyPart(self) then
+                local target = ...
+                if target ~= player and target ~= nil then return end
+            end
+        elseif method == "PivotTo" or method == "SetPrimaryPartCFrame" then
+            if isOurCharModel(self) then return end
+        end
+
+        return oldNamecall(self, ...)
+    end)
+
+    setreadonly(mt, true)
+end)
+
+-- ==========================================
+-- UI SIZING
 -- ==========================================
 local isMobile = UserInputService.TouchEnabled
 
@@ -283,17 +173,19 @@ local function computeStartPosition()
 end
 
 -- ==========================================
--- CONFIG
+-- CONFIG — GRAPPLE-SAFE THRESHOLDS
 -- ==========================================
 local FLY_SPEED          = 50
 local runSpeedValue      = 50
 local DOUBLE_TAP_WINDOW  = 0.35
 
-local MAX_SPEED             = 150
-local MAX_ANGULAR           = 50
-local MAX_TELEPORT_DISTANCE = 500
-local DEFAULT_WALKSPEED     = 16
-local DEFAULT_JUMPPOWER     = 50
+-- Legit mechanics stay under these:
+--   Grapple:    200–500 studs/s
+--   Dash:       400–700 studs/s
+--   Fast travel: up to 800 studs/s
+-- Exploiters go 3000+ studs/s so we sit safely between.
+local MAX_SPEED             = 800
+local MAX_ANGULAR           = 200
 local SMOOTHING_FACTOR      = 0.35
 
 local IMMORTAL_MAX_HEALTH = 100000
@@ -301,15 +193,6 @@ local IMMORTAL_TARGET_HP  = 95000
 
 local FALL_MAX_DOWN_VEL   = -45
 local FALL_RECENT_WINDOW  = 2.5
-
-local AI_DANGER_DIST = 15
-local AI_ESCAPE_DIST = 15
-local AI_HEIGHT      = 15
-
-local AF_MAX_SPEED       = 120
-local AF_MAX_ANGULAR     = 30
-local AF_MAX_FRAME_MOVE  = 15
-local AF_FREEZE_TIME     = 1.2
 
 local flyToggleEnabled    = false
 local isFlying            = false
@@ -320,17 +203,13 @@ local antiFlingEnabled    = false
 local antiTrapEnabled     = false
 local isMinimized         = false
 local isTeleporting       = false
-local lastPos             = nil
-local isRecovering        = false
 
 local lastJumpTapTime     = 0
 local lastJumpReqTime     = 0
-local entrySpawnCFrame    = nil
 local savedMapCFrame      = nil
 
 local character, rootPart, humanoid
 local attachment, linearVelocity
-local isRestoringStats    = false
 
 local controls = nil
 pcall(function()
@@ -345,84 +224,7 @@ pcall(function()
 end)
 
 -- ==========================================
--- LADDER DETECTION
--- ==========================================
-local function isNearLadder(char)
-    if not char or not char.PrimaryPart then return false end
-    local params = OverlapParams.new()
-    params.FilterDescendantsInstances = {char}
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    local parts = workspace:GetPartBoundsInBox(char.PrimaryPart.CFrame, Vector3.new(6, 8, 6), params)
-    for _, part in ipairs(parts) do
-        if part:IsA("TrussPart") or string.find(string.lower(part.Name), "ladder") then
-            return true
-        end
-    end
-    return false
-end
-
--- ==========================================
--- RAGDOLL RECOVERY
--- ==========================================
-local function recoverFromRagdoll()
-    if isRecovering or not character or not rootPart or not humanoid then return end
-    isRecovering = true
-    pcall(function() rootPart:SetNetworkOwner(player) end)
-    if rootPart.Anchored then rootPart.Anchored = false end
-    humanoid.PlatformStand = false
-    humanoid.Sit = false
-    rootPart.AssemblyLinearVelocity  = Vector3.zero
-    rootPart.AssemblyAngularVelocity = Vector3.zero
-    pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-    local currentPos = rootPart.Position
-    local lookVector = rootPart.CFrame.LookVector
-    local uprightCFrame = CFrame.new(currentPos, currentPos + Vector3.new(lookVector.X, 0, lookVector.Z))
-    rootPart.CFrame = uprightCFrame
-    task.delay(0.1, function()
-        if humanoid and humanoid.Parent then
-            pcall(function()
-                if humanoid.FloorMaterial ~= Enum.Material.Air then
-                    humanoid:ChangeState(Enum.HumanoidStateType.Running)
-                else
-                    humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
-                end
-            end)
-        end
-        isRecovering = false
-    end)
-end
-
--- ==========================================
--- STAT RESTORE
--- ==========================================
-local function smoothRestoreStats()
-    if isRestoringStats or not humanoid then return end
-    isRestoringStats = true
-    task.spawn(function()
-        if not runSpeedEnabled and (humanoid.WalkSpeed <= 0 or humanoid.WalkSpeed > 100) then
-            local target = DEFAULT_WALKSPEED
-            for i = 1, 8 do
-                if not humanoid or not humanoid.Parent then break end
-                humanoid.WalkSpeed = humanoid.WalkSpeed + (target - humanoid.WalkSpeed) * 0.3
-                task.wait(0.02)
-            end
-            if humanoid and humanoid.Parent then humanoid.WalkSpeed = target end
-        end
-        if humanoid and humanoid.Parent and (humanoid.JumpPower <= 0 or humanoid.JumpPower > 100) then
-            local target = DEFAULT_JUMPPOWER
-            for i = 1, 8 do
-                if not humanoid or not humanoid.Parent then break end
-                humanoid.JumpPower = humanoid.JumpPower + (target - humanoid.JumpPower) * 0.3
-                task.wait(0.02)
-            end
-            if humanoid and humanoid.Parent then humanoid.JumpPower = target end
-        end
-        isRestoringStats = false
-    end)
-end
-
--- ==========================================
--- IMMORTAL ENGINE
+-- IMMORTAL
 -- ==========================================
 local function immortal_apply()
     if not character or not humanoid then return end
@@ -439,12 +241,10 @@ end
 local function immortal_regen()
     if not getgenv().ImmortalActive then return end
     if not character or not humanoid then return end
-    if humanoid.Health < IMMORTAL_TARGET_HP then
-        pcall(function() humanoid.Health = IMMORTAL_TARGET_HP end)
-    end
-    if humanoid.MaxHealth < IMMORTAL_MAX_HEALTH then
-        pcall(function() humanoid.MaxHealth = IMMORTAL_MAX_HEALTH end)
-    end
+    pcall(function()
+        if humanoid.Health < IMMORTAL_TARGET_HP then humanoid.Health = IMMORTAL_TARGET_HP end
+        if humanoid.MaxHealth < IMMORTAL_MAX_HEALTH then humanoid.MaxHealth = IMMORTAL_MAX_HEALTH end
+    end)
 end
 
 local function immortal_hookHumanoid(hum)
@@ -454,38 +254,15 @@ local function immortal_hookHumanoid(hum)
             pcall(function() hum.Health = IMMORTAL_TARGET_HP end)
         end
     end)
-    hum.Died:Connect(function()
-        if getgenv().ImmortalActive and hum == humanoid then
-            task.defer(function()
-                if character and character.Parent then
-                    pcall(function()
-                        hum.Health = IMMORTAL_TARGET_HP
-                        hum:ChangeState(Enum.HumanoidStateType.Running)
-                    end)
-                end
-            end)
-        end
-    end)
-    hum.StateChanged:Connect(function(_, newState)
-        if getgenv().ImmortalActive and hum == humanoid then
-            if newState == Enum.HumanoidStateType.Dead then
-                pcall(function()
-                    hum.Health = IMMORTAL_TARGET_HP
-                    hum:ChangeState(Enum.HumanoidStateType.Running)
-                end)
-            end
-        end
-    end)
 end
 
 -- ==========================================
--- NO FALL DAMAGE ENGINE
+-- NO FALL DAMAGE
 -- ==========================================
 local lastAirborneTime = 0
-local wasAirborne      = false
 
 local function isAirborneFalling()
-    if not humanoid or not rootPart then return false end
+    if not humanoid then return false end
     local st = humanoid:GetState()
     if st == Enum.HumanoidStateType.Freefall
     or st == Enum.HumanoidStateType.Jumping
@@ -500,7 +277,6 @@ local function fall_capVelocity()
     if not noFallDamageEnabled then return end
     if not rootPart or not humanoid then return end
     if isAirborneFalling() then
-        wasAirborne = true
         lastAirborneTime = tick()
         local v = rootPart.AssemblyLinearVelocity
         if v.Y < FALL_MAX_DOWN_VEL then
@@ -515,153 +291,9 @@ local function fall_hookHumanoid(hum)
         if not noFallDamageEnabled then return end
         if hum ~= humanoid then return end
         if newH < hum.MaxHealth and (tick() - lastAirborneTime) < FALL_RECENT_WINDOW then
-            pcall(function()
-                hum.Health = hum.MaxHealth
-                lastAirborneTime = 0
-            end)
+            pcall(function() hum.Health = hum.MaxHealth end)
         end
     end)
-    hum.StateChanged:Connect(function(_, newState)
-        if not noFallDamageEnabled then return end
-        if hum ~= humanoid then return end
-        if newState == Enum.HumanoidStateType.FallingDown
-        or newState == Enum.HumanoidStateType.Landed
-        or newState == Enum.HumanoidStateType.GettingUp then
-            pcall(function()
-                if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
-                if hum.FloorMaterial ~= Enum.Material.Air then
-                    hum:ChangeState(Enum.HumanoidStateType.Running)
-                end
-            end)
-        end
-    end)
-    hum.Died:Connect(function()
-        if not noFallDamageEnabled then return end
-        if hum ~= humanoid then return end
-        if (tick() - lastAirborneTime) < FALL_RECENT_WINDOW then
-            task.defer(function()
-                if character and character.Parent then
-                    pcall(function()
-                        hum.Health = hum.MaxHealth
-                        hum:ChangeState(Enum.HumanoidStateType.Running)
-                    end)
-                end
-            end)
-        end
-    end)
-end
-
--- ==========================================
--- ENHANCED ANTI-RAGDOLL / ANTI-FLING ENGINE
--- ==========================================
-local AF_poseSnapshot    = {}
-local AF_lastGoodPos     = nil
-local AF_freezeMode      = false
-local AF_freezeCFrame    = nil
-local AF_freezeRelease   = 0
-
-local function AF_snapshotPose()
-    AF_poseSnapshot = {}
-    if not character or not rootPart then return end
-    for _, d in ipairs(character:GetDescendants()) do
-        if d:IsA("Motor6D") then
-            AF_poseSnapshot[d] = { C0 = d.C0, C1 = d.C1 }
-        end
-    end
-end
-
-local function AF_restoreJoints()
-    if not character then return end
-    for joint, base in pairs(AF_poseSnapshot) do
-        if joint and joint.Parent then
-            if joint.C0 ~= base.C0 then joint.C0 = base.C0 end
-            if joint.C1 ~= base.C1 then joint.C1 = base.C1 end
-        end
-    end
-end
-
-local function AF_isUnderAttack(curPos)
-    if not rootPart or not humanoid then return false end
-    local vel = rootPart.AssemblyLinearVelocity
-    local angVel = rootPart.AssemblyAngularVelocity
-    if vel.Magnitude > AF_MAX_SPEED then return true end
-    if angVel.Magnitude > AF_MAX_ANGULAR then return true end
-    if AF_lastGoodPos then
-        local frameDelta = (curPos - AF_lastGoodPos).Magnitude
-        if frameDelta > AF_MAX_FRAME_MOVE and not isTeleporting then
-            return true
-        end
-    end
-    return false
-end
-
-local function AF_tick()
-    if not antiFlingEnabled then
-        AF_freezeMode = false
-        return
-    end
-    if not character or not rootPart or not humanoid then return end
-    if isTeleporting or isFlying or getgenv().NoclipActive or AI_isSkyWalking then
-        AF_freezeMode = false
-        AF_lastGoodPos = rootPart.Position
-        AF_snapshotPose()
-        return
-    end
-
-    if humanoid.PlatformStand then humanoid.PlatformStand = false end
-    if humanoid.Sit then humanoid.Sit = false end
-    local st = humanoid:GetState()
-    if st == Enum.HumanoidStateType.Physics
-    or st == Enum.HumanoidStateType.Ragdoll
-    or st == Enum.HumanoidStateType.FallingDown then
-        pcall(function()
-            if humanoid.FloorMaterial ~= Enum.Material.Air then
-                humanoid:ChangeState(Enum.HumanoidStateType.Running)
-            else
-                humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
-            end
-        end)
-    end
-
-    local curPos = rootPart.Position
-    if AF_isUnderAttack(curPos) then
-        if not AF_freezeMode then
-            AF_freezeMode = true
-            AF_freezeCFrame = AF_lastGoodPos and CFrame.new(AF_lastGoodPos) or rootPart.CFrame
-            print("[ANTI-FLING] Attack detected — FROZEN")
-        end
-        AF_freezeRelease = tick() + AF_FREEZE_TIME
-    end
-
-    if AF_freezeMode then
-        if AF_freezeCFrame then rootPart.CFrame = AF_freezeCFrame end
-        rootPart.AssemblyLinearVelocity  = Vector3.zero
-        rootPart.AssemblyAngularVelocity = Vector3.zero
-        AF_restoreJoints()
-        if tick() > AF_freezeRelease then
-            AF_freezeMode = false
-            AF_lastGoodPos = rootPart.Position
-            print("[ANTI-FLING] Released — unfroze")
-        end
-        return
-    end
-
-    local vel = rootPart.AssemblyLinearVelocity
-    if vel.Magnitude > MAX_SPEED then
-        rootPart.AssemblyLinearVelocity = vel:Lerp(vel.Unit * MAX_SPEED, SMOOTHING_FACTOR)
-    end
-    local angVel = rootPart.AssemblyAngularVelocity
-    if angVel.Magnitude > MAX_ANGULAR then
-        rootPart.AssemblyAngularVelocity = angVel:Lerp(angVel.Unit * MAX_ANGULAR, SMOOTHING_FACTOR)
-    end
-
-    local owner = rootPart:GetNetworkOwner()
-    if owner and owner ~= player then
-        pcall(function() rootPart:SetNetworkOwner(player) end)
-    end
-
-    AF_restoreJoints()
-    AF_lastGoodPos = rootPart.Position
 end
 
 -- ==========================================
@@ -709,24 +341,18 @@ minimizeButton.TextColor3 = Color3.fromRGB(200, 200, 210)
 minimizeButton.Font = Enum.Font.GothamBold
 minimizeButton.TextSize = 18
 minimizeButton.Parent = mainFrame
-minimizeButton.Active = false
+minimizeButton.Active = true
 minimizeButton.ZIndex = 10
 Instance.new("UICorner", minimizeButton).CornerRadius = UDim.new(0, 8)
 
--- ==========================================
--- SMART DRAG (clamped to viewport)
--- ==========================================
 do
     local dragging, dragStart, startPos
-    local function getVP()
-        return (camera and camera.ViewportSize) or Vector2.new(800, 600)
-    end
     local function beginDrag(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch then
             dragging   = true
             dragStart  = input.Position
-            startPos   = mainFrame.AbsolutePosition
+            startPos   = mainFrame.Position
         end
     end
     local function moveDrag(input)
@@ -734,14 +360,10 @@ do
         if input.UserInputType == Enum.UserInputType.MouseMovement
         or input.UserInputType == Enum.UserInputType.Touch then
             local delta = input.Position - dragStart
-            local vp = getVP()
-            local size = mainFrame.AbsoluteSize
-            local margin = 4
-            local newX = startPos.X + delta.X
-            local newY = startPos.Y + delta.Y
-            newX = math.clamp(newX, margin, math.max(margin, vp.X - size.X - margin))
-            newY = math.clamp(newY, margin, math.max(margin, vp.Y - size.Y - margin))
-            mainFrame.Position = UDim2.new(0, newX, 0, newY)
+            mainFrame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
         end
     end
     local function endDrag(input)
@@ -756,24 +378,6 @@ do
     minimizeButton.InputBegan:Connect(beginDrag)
     minimizeButton.InputChanged:Connect(moveDrag)
     minimizeButton.InputEnded:Connect(endDrag)
-end
-
-local function onViewportResize()
-    PANEL_W, PANEL_H = computePanelSize()
-    if not isMinimized then
-        mainFrame.Size = UDim2.new(0, PANEL_W, 0, PANEL_H)
-    end
-    local vp = (camera and camera.ViewportSize) or Vector2.new(800, 600)
-    local pos = mainFrame.AbsolutePosition
-    local size = mainFrame.AbsoluteSize
-    local margin = 4
-    local x = math.clamp(pos.X, margin, math.max(margin, vp.X - size.X - margin))
-    local y = math.clamp(pos.Y, margin, math.max(margin, vp.Y - size.Y - margin))
-    mainFrame.Position = UDim2.new(0, x, 0, y)
-end
-
-if camera then
-    camera:GetPropertyChangedSignal("ViewportSize"):Connect(onViewportResize)
 end
 
 local toggleContainer = Instance.new("ScrollingFrame")
@@ -838,7 +442,7 @@ local function createToggleRow(name, yPos, callback, defaultOn)
             knob.BackgroundColor3 = Color3.fromRGB(200, 200, 210)
             knob:TweenPosition(UDim2.new(0, 3, 0.5, -7), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.15, true)
         end
-        callback(activeState)
+        pcall(callback, activeState)
     end)
     return row
 end
@@ -873,7 +477,7 @@ local function createInputRow(name, yPos, defaultVal, callback)
 
     textBox.FocusLost:Connect(function()
         local num = tonumber(textBox.Text)
-        if num then callback(num) else textBox.Text = tostring(defaultVal) end
+        if num then pcall(callback, num) else textBox.Text = tostring(defaultVal) end
     end)
     return row
 end
@@ -889,40 +493,38 @@ local function createActionButton(name, yPos, color, callback)
     btn.TextSize = 12
     btn.Parent = toggleContainer
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-    btn.MouseButton1Click:Connect(callback)
+    btn.MouseButton1Click:Connect(function() pcall(callback) end)
     return btn
 end
 
 -- ==========================================
--- TELEPORT & FLYING
+-- TELEPORT / FLYING
 -- ==========================================
 local function absoluteTeleport(targetCFrame)
-    local cChar, cRoot, cHum = character, rootPart, humanoid
-    if not cChar or not cRoot then return end
+    if not character or not rootPart then return end
     isTeleporting = true
-    if cHum then
-        cHum.Sit = false
-        cHum:ChangeState(Enum.HumanoidStateType.GettingUp)
+    if humanoid then
+        humanoid.Sit = false
+        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
     end
-    cRoot.AssemblyLinearVelocity  = Vector3.zero
-    cRoot.AssemblyAngularVelocity = Vector3.zero
-    cRoot.Anchored = true
-    cChar:PivotTo(targetCFrame + Vector3.new(0, 3, 0))
-    task.delay(0.04, function()
-        if cRoot and cRoot.Parent then
-            cRoot.AssemblyLinearVelocity  = Vector3.zero
-            cRoot.AssemblyAngularVelocity = Vector3.zero
-            cRoot.Anchored = false
+    rootPart.AssemblyLinearVelocity  = Vector3.zero
+    rootPart.AssemblyAngularVelocity = Vector3.zero
+    rootPart.Anchored = true
+    character:PivotTo(targetCFrame + Vector3.new(0, 3, 0))
+    task.delay(0.06, function()
+        if rootPart and rootPart.Parent then
+            rootPart.AssemblyLinearVelocity  = Vector3.zero
+            rootPart.AssemblyAngularVelocity = Vector3.zero
+            rootPart.Anchored = false
         end
-        if cHum and cHum.Parent then
-            cHum:ChangeState(Enum.HumanoidStateType.Running)
+        if humanoid and humanoid.Parent then
+            pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
         end
         isTeleporting = false
     end)
 end
 
 local function getEntrySpawn()
-    if entrySpawnCFrame then return entrySpawnCFrame end
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("SpawnLocation") and obj.Enabled then
             return obj.CFrame + Vector3.new(0, 3, 0)
@@ -936,12 +538,12 @@ local function setFlying(state)
     isFlying = state
     if isFlying then
         linearVelocity.MaxForce = 100000
-        humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Freefall) end)
     else
         linearVelocity.MaxForce = 0
         linearVelocity.VectorVelocity = Vector3.zero
         if humanoid.FloorMaterial ~= Enum.Material.Air then
-            humanoid:ChangeState(Enum.HumanoidStateType.Running)
+            pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
         end
     end
 end
@@ -960,29 +562,19 @@ createToggleRow("Immortal Mode", 40, function(state)
     if state then
         immortal_apply()
         if humanoid then immortal_hookHumanoid(humanoid) end
-        warn("[Immortal] ENABLED")
     else
         if humanoid then
             pcall(function()
                 humanoid.MaxHealth = 100
                 humanoid.Health = math.min(humanoid.Health, 100)
-                humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
             end)
         end
-        warn("[Immortal] DISABLED")
     end
 end)
 
 createToggleRow("No Fall Damage", 75, function(state)
     noFallDamageEnabled = state
     getgenv().NoFallDamageActive = state
-    if state then
-        if humanoid then
-            pcall(function() humanoid.FallDamage = 0 end)
-            pcall(function() humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
-        end
-        warn("[NoFallDamage] ENABLED")
-    end
 end)
 
 createToggleRow("Force Noclip Bypass", 110, function(state)
@@ -999,35 +591,25 @@ createToggleRow("Anti-Ragdoll & Anti-Fling", 145, function(state)
     getgenv().AntiFlingActive = state
     if humanoid then
         if state then
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-            AF_snapshotPose()
-            AF_lastGoodPos = rootPart and rootPart.Position or nil
-            AF_freezeMode = false
-            warn("[Anti-Fling] Pose lock ARMED")
+            pcall(function()
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+            end)
         else
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, true)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, true)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-            AF_freezeMode = false
-            warn("[Anti-Fling] Pose lock DISARMED")
+            pcall(function()
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, true)
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, true)
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+            end)
         end
     end
 end)
 
 createToggleRow("Anti Trap", 180, function(state)
     antiTrapEnabled = state
-    if not state and character then
-        for _, part in ipairs(character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanTouch = true
-                part.CanQuery = true
-            end
-        end
-    end
 end)
 
 createToggleRow("Super Run Speed", 215, function(state)
@@ -1041,18 +623,10 @@ end)
 createToggleRow("⚡ Absolute Defense", 285, function(state)
     getgenv().AbsoluteActive = state
     getgenv().AntiExploitActive = state
-    if state then
-        AE_armCharacter()
-        warn("[Absolute] DEFENSE ENABLED — nothing can touch your body")
-    else
-        AE_disarm()
-        warn("[Absolute] DEFENSE DISABLED")
-    end
 end)
 
 createToggleRow("Anti Monster", 320, function(state)
     getgenv().AISkyWalkActive = state
-    if state then AI_start() else AI_stop() end
 end)
 
 createActionButton("TP to Entry Spawn", 355, Color3.fromRGB(41, 128, 185), function()
@@ -1075,9 +649,6 @@ local tpMapButton = createActionButton("TP to Saved Map Location", 429, Color3.f
     end
 end)
 
--- ==========================================
--- MINIMIZE
--- ==========================================
 minimizeButton.MouseButton1Click:Connect(function()
     isMinimized = not isMinimized
     if isMinimized then
@@ -1086,7 +657,6 @@ minimizeButton.MouseButton1Click:Connect(function()
         local x = math.clamp(pos.X, 4, math.max(4, vp.X - MINIMIZED_SIZE - 4))
         local y = math.clamp(pos.Y, 4, math.max(4, vp.Y - MINIMIZED_SIZE - 4))
         mainFrame.Position = UDim2.new(0, x, 0, y)
-
         mainFrame.Size = UDim2.new(0, MINIMIZED_SIZE, 0, MINIMIZED_SIZE)
         toggleContainer.Visible = false
         titleLabel.Visible = false
@@ -1106,7 +676,6 @@ minimizeButton.MouseButton1Click:Connect(function()
         minimizeButton.Position = UDim2.new(1, -38, 0, 5)
         minimizeButton.Text = "-"
         minimizeButton.TextSize = 18
-
         local vp = (camera and camera.ViewportSize) or Vector2.new(800, 600)
         local pos = mainFrame.AbsolutePosition
         local x = math.clamp(pos.X, 4, math.max(4, vp.X - PANEL_W - 4))
@@ -1115,14 +684,10 @@ minimizeButton.MouseButton1Click:Connect(function()
     end
 end)
 
--- ==========================================
--- FLIGHT / JUMP TAP
--- ==========================================
 local function handleJumpTap()
     if not flyToggleEnabled then return end
     local currentTime = os.clock()
-    local timeSinceLastTap = currentTime - lastJumpTapTime
-    if timeSinceLastTap <= DOUBLE_TAP_WINDOW then
+    if (currentTime - lastJumpTapTime) <= DOUBLE_TAP_WINDOW then
         if isFlying then setFlying(false)
         elseif humanoid and (humanoid:GetState() == Enum.HumanoidStateType.Freefall
                           or humanoid:GetState() == Enum.HumanoidStateType.Jumping) then
@@ -1141,138 +706,34 @@ UserInputService.JumpRequest:Connect(function()
 end)
 
 -- ==========================================
--- ANTI-EXPLOIT SHIELD
+-- ANTI-EXPLOIT — SMART DETECTION
+-- Only fires when BOTH delta and velocity are absurd.
+-- Grapples (high delta + normal velocity) pass through.
+-- Flings (high delta + huge velocity) get caught.
 -- ==========================================
-local AE_motorSnapshot     = {}
-local AE_allowedChildren   = {}
-local AE_whitelistCharacter = nil
-local AE_lastPos           = nil
-local AE_lastSnapTime      = 0
-local AE_reported          = {}
-local AE_active            = false
+local AE_lastPos        = nil
+local AE_lastSnapTime   = 0
+local AE_MAX_DELTA      = 400       -- studs in one frame
+local AE_MAX_VELOCITY   = 2500      -- studs/s
+local AE_MAX_ANGULAR    = 200       -- rad/s
+local AE_SNAP_VELOCITY  = 1500      -- vel must ALSO be above this to trigger snap
 
-local AE_MAX_DELTA    = 100
-local AE_MAX_VELOCITY = 500
-local AE_MAX_ANGULAR  = 40
-local AE_LOG          = true
-
-local function AE_log(...)
-    if AE_LOG then print("[ABSOLUTE]", ...) end
-end
-
-local function AE_whitelistBuild()
-    AE_allowedChildren = {}
-    AE_whitelistCharacter = character
-    if not character then return end
-    for _, c in ipairs(character:GetChildren()) do
-        AE_allowedChildren[c] = true
-    end
-    for _, d in ipairs(character:GetDescendants()) do
-        if d:IsA("Accessory") or d:IsA("BodyColors") or d:IsA("Shirt")
-        or d:IsA("Pants") or d:IsA("CharacterMesh") or d:IsA("Decal")
-        or d:IsA("Sound") or d:IsA("Animator") then
-            AE_allowedChildren[d] = true
-        end
-    end
-end
-
-local function AE_snapshotMotors()
-    AE_motorSnapshot = {}
-    if not character then return end
-    for _, d in ipairs(character:GetDescendants()) do
-        if d:IsA("Motor6D") or d:IsA("Weld") or d:IsA("Snap") then
-            AE_motorSnapshot[d.Name] = {
-                Class = d.ClassName, Part0 = d.Part0, Part1 = d.Part1,
-                C0 = d.C0, C1 = d.C1, Parent = d.Parent,
-            }
-        end
-    end
-end
-
-function AE_armCharacter()
-    if not character or not rootPart then return end
-    AE_active = true
-    AE_lastPos = rootPart.Position
-    AE_whitelistBuild()
-    AE_snapshotMotors()
-    pcall(function()
-        if rootPart:GetNetworkOwner() ~= player then
-            rootPart:SetNetworkOwner(player)
-        end
-    end)
-    AE_log("Armed.")
-end
-
-function AE_disarm()
-    AE_active = false
-    AE_motorSnapshot = {}
-    AE_allowedChildren = {}
-    AE_whitelistCharacter = nil
-end
-
-local function AE_restoreMotors()
-    if not character then return end
-    for name, info in pairs(AE_motorSnapshot) do
-        local exists = false
-        for _, d in ipairs(character:GetDescendants()) do
-            if d.Name == name and (d:IsA("Motor6D") or d:IsA("Weld") or d:IsA("Snap")) then
-                exists = true break
-            end
-        end
-        if not exists
-        and info.Part0 and info.Part0.Parent == character
-        and info.Part1 and info.Part1.Parent == character then
-            local j = Instance.new(info.Class)
-            j.Name = name; j.Part0 = info.Part0; j.Part1 = info.Part1
-            j.C0 = info.C0; j.C1 = info.C1; j.Parent = info.Parent
-            AE_log("Restored joint:", name)
-        end
-    end
-end
-
-local function AE_cleanForeign()
-    if getgenv().NoclipActive or AI_isSkyWalking then return end
-    if not character then return end
-    if AE_whitelistCharacter ~= character then return end
-    if not next(AE_allowedChildren) then return end
-
-    -- NOTE: No longer destroy foreign BaseParts.
-    -- Pets/tools/accessories are legitimate. Metatable hook already stops
-    -- anything from moving our real body parts, so a planted part is harmless.
-    --
-    -- Only remove suspicious MOVEMENT actuators inside our character.
-    -- Skip Welds/Motor6D/WeldConstraint — pets and tools use those legitimately.
-    for _, d in ipairs(character:GetDescendants()) do
-        if not AE_allowedChildren[d] and not AE_motorSnapshot[d.Name] then
-            if d:IsA("BodyVelocity") or d:IsA("BodyPosition") or d:IsA("BodyGyro")
-            or d:IsA("LinearVelocity") or d:IsA("AlignPosition")
-            or d:IsA("AlignOrientation") or d:IsA("VectorForce")
-            or d:IsA("RocketPropulsion") then
-                local n = d.Name
-                if n ~= "FlightVelocity"
-                   and n ~= "FlightAttachment"
-                   and n ~= "AI_SkyWalk_Vel"
-                   and n ~= "AI_SkyWalk_Pos"
-                   and n ~= "AI_SkyWalk_Attachment" then
-                    AE_log("Removed foreign actuator:", n, d.ClassName)
-                    d:Destroy()
-                end
-            end
-        end
-    end
-end
-
-local function AE_guardPhysics(dt)
-    if getgenv().NoclipActive or AI_isSkyWalking or isTeleporting then
+local function AE_guardPhysics()
+    if not getgenv().AntiExploitActive then return end
+    if getgenv().NoclipActive or isTeleporting then
         AE_lastPos = rootPart.Position
         return
     end
+
     local pos = rootPart.Position
     local vel = rootPart.AssemblyLinearVelocity
+
     if AE_lastPos then
         local delta = (pos - AE_lastPos).Magnitude
-        if delta > AE_MAX_DELTA and (tick() - AE_lastSnapTime) > 1.5 then
-            AE_log(("Teleport detected (%.0f) — snapping back."):format(delta))
+        -- SMART: require BOTH frame teleport AND fling velocity
+        if delta > AE_MAX_DELTA
+           and vel.Magnitude > AE_SNAP_VELOCITY
+           and (tick() - AE_lastSnapTime) > 1.5 then
             rootPart.CFrame = CFrame.new(AE_lastPos)
             rootPart.AssemblyLinearVelocity  = Vector3.zero
             rootPart.AssemblyAngularVelocity = Vector3.zero
@@ -1280,378 +741,94 @@ local function AE_guardPhysics(dt)
             return
         end
     end
+
+    -- Only zero velocity if it's clearly injected (>2500 studs/s)
     if vel.Magnitude > AE_MAX_VELOCITY then
-        AE_log(("Injected velocity (%.0f) — zeroing."):format(vel.Magnitude))
         rootPart.AssemblyLinearVelocity = Vector3.zero
     end
     if rootPart.AssemblyAngularVelocity.Magnitude > AE_MAX_ANGULAR then
         rootPart.AssemblyAngularVelocity = Vector3.zero
     end
+
     AE_lastPos = rootPart.Position
 end
 
-local function AE_enforceState()
-    if getgenv().NoclipActive or AI_isSkyWalking then return end
-    if humanoid.PlatformStand then
-        AE_log("PlatformStand forced — resetting.")
-        humanoid.PlatformStand = false
-    end
-    if humanoid.Sit then
-        AE_log("Sit forced — resetting.")
-        humanoid.Sit = false
-    end
-    local st = humanoid:GetState()
-    if st == Enum.HumanoidStateType.Physics
-    or st == Enum.HumanoidStateType.Ragdoll
-    or st == Enum.HumanoidStateType.FallingDown
-    or st == Enum.HumanoidStateType.Dead then
-        pcall(function()
-            humanoid:ChangeState(Enum.HumanoidStateType.Running)
-        end)
-    end
-    pcall(function()
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+-- ==========================================
+-- CHARACTER SETUP
+-- ==========================================
+local function setupCharacter(ch)
+    character = ch
+    rootPart = ch:WaitForChild("HumanoidRootPart")
+    humanoid = ch:WaitForChild("Humanoid")
+    if not rootPart or not humanoid then return end
+
+    rootPart.CanCollide = false
+    rootPart.Anchored = false
+
+    if rootPart:FindFirstChild("FlightAttachment") then rootPart.FlightAttachment:Destroy() end
+    if rootPart:FindFirstChild("FlightVelocity") then rootPart.FlightVelocity:Destroy() end
+
+    attachment = Instance.new("Attachment")
+    attachment.Name = "FlightAttachment"
+    attachment.Parent = rootPart
+
+    linearVelocity = Instance.new("LinearVelocity")
+    linearVelocity.Name = "FlightVelocity"
+    linearVelocity.Attachment0 = attachment
+    linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+    linearVelocity.MaxForce = 0
+    linearVelocity.VectorVelocity = Vector3.zero
+    linearVelocity.Parent = rootPart
+
+    lastAirborneTime = 0
+    AE_lastPos = rootPart.Position
+
+    immortal_hookHumanoid(humanoid)
+    fall_hookHumanoid(humanoid)
+
+    if getgenv().ImmortalActive then immortal_apply() end
+
+    humanoid:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+        if (antiFlingEnabled or getgenv().AbsoluteActive) and humanoid.PlatformStand then
+            humanoid.PlatformStand = false
+        end
     end)
-end
+    humanoid:GetPropertyChangedSignal("Sit"):Connect(function()
+        if (antiFlingEnabled or getgenv().AbsoluteActive) and humanoid.Sit then
+            humanoid.Sit = false
+        end
+    end)
 
-local function AE_reclaimOwnership()
-    if getgenv().NoclipActive or AI_isSkyWalking then return end
-    if rootPart then
+    if antiFlingEnabled then
         pcall(function()
-            if rootPart:GetNetworkOwner() ~= player then
-                rootPart:SetNetworkOwner(player)
-            end
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
         end)
     end
+
+    if flyToggleEnabled then setFlying(true) end
 end
 
-local function AE_watchNearby()
-    local myPos = rootPart.Position
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= player then
-            local oc = plr.Character
-            local ohrp = oc and oc:FindFirstChild("HumanoidRootPart")
-            if ohrp then
-                local d  = (ohrp.Position - myPos).Magnitude
-                local ov = ohrp.AssemblyLinearVelocity.Magnitude
-                local ohum = oc:FindFirstChildOfClass("Humanoid")
-                if d < 4 and (ov > 250 or (ohum and ohum.PlatformStand)) then
-                    if not AE_reported[plr.Name] then
-                        AE_reported[plr.Name] = true
-                        AE_log(("SUSPICIOUS: %s d=%.1f v=%.1f"):format(plr.Name, d, ov))
-                    end
-                end
-            end
-        end
-    end
-end
-
--- ==========================================
--- ANTI MONSTER — STRICT DETECTION
--- ==========================================
-AI_isSkyWalking = false
-local AI_groundY       = 0
-local AI_linearVel     = nil
-local AI_bodyPos       = nil
-local AI_registry      = setmetatable({}, {__mode = "k"})
-local AI_registryBuilt = false
-
-local AI_FRIENDLY_KEYWORDS = {
-    "shop","vendor","merchant","quest","trainer","citizen","dummy",
-    "training","blacksmith","healer","safezone","companion","pet",
-    "npc","friendly","neutral","passive","decoration","prop"
-}
-local AI_HOSTILE_NAME_HINTS = {
-    "guard","enemy","monster","boss","zombie","hunter","chaser",
-    "killer","brute","mutant","beast","demon","raider","bandit",
-    "reaper","stalker","fiend","wraith"
-}
-local AI_HOSTILE_TAGS = {
-    "AI","Enemy","Hostile","Monster","Guard","NPC_Hostile",
-    "Chaser","Aggro","Boss","Mob"
-}
-local AI_HOSTILE_ATTRIBUTES = {
-    "AIState", "State", "Aggro", "IsAggro", "Hostile", "InCombat",
-    "IsHostile", "IsEnemy", "Enemy", "Attacking"
-}
-local AI_HOSTILE_ATTR_VALUES = {
-    "chase", "chasing", "attack", "attacking", "aggro", "aggressive",
-    "hostile", "hunt", "hunting", "combat", "pursue", "seek", "follow"
-}
-local AI_FRIENDLY_CONTAINER_NAMES = {
-    "friendly", "friendlies", "neutrals", "neutral", "npcs", "npc",
-    "peaceful", "passive", "citizens", "villagers", "shops", "npcs_safe"
-}
-local AI_FRIENDLY_TAGS = {
-    "Friendly", "Neutral", "NPC", "Shop", "Quest", "Passive", "NonHostile"
-}
-
-local function AI_nameHasAny(name, list)
-    if not name then return false end
-    name = name:lower()
-    for _, kw in ipairs(list) do
-        if name:find(kw, 1, true) then return true end
-    end
-    return false
-end
-
-local function AI_inFriendlyContainer(model)
-    local parent = model.Parent
-    local depth = 0
-    while parent and parent ~= workspace and depth < 6 do
-        if AI_nameHasAny(parent.Name, AI_FRIENDLY_CONTAINER_NAMES) then
-            return true
-        end
-        parent = parent.Parent
-        depth = depth + 1
-    end
-    return false
-end
-
-local function AI_hasHostileAttribute(model)
-    for _, attrName in ipairs(AI_HOSTILE_ATTRIBUTES) do
-        local val = model:GetAttribute(attrName)
-        if val ~= nil then
-            if val == true then return true end
-            if type(val) == "string" then
-                local vl = val:lower()
-                for _, kw in ipairs(AI_HOSTILE_ATTR_VALUES) do
-                    if vl:find(kw, 1, true) then return true end
-                end
-            end
-        end
-    end
-    return false
-end
-
-local function AI_hasHostileTag(model)
-    for _, tag in ipairs(AI_FRIENDLY_TAGS) do
-        if CollectionService:HasTag(model, tag) then return false end
-    end
-    for _, tag in ipairs(AI_HOSTILE_TAGS) do
-        if CollectionService:HasTag(model, tag) then return true end
-    end
-    return false
-end
-
-local function AI_targetsUs(model, myChar)
-    for _, d in ipairs(model:GetDescendants()) do
-        if d:IsA("ObjectValue") then
-            local n = d.Name:lower()
-            if n:find("target") or n:find("enemy") or n:find("aggro") then
-                local v = d.Value
-                if v == myChar
-                or v == myChar:FindFirstChild("Humanoid")
-                or v == myChar:FindFirstChild("HumanoidRootPart") then
-                    return true
-                end
-            end
-        end
-    end
-    return false
-end
-
-local function AI_hasHostileScript(model)
-    for _, d in ipairs(model:GetDescendants()) do
-        if d:IsA("Script") or d:IsA("LocalScript") then
-            local n = d.Name:lower()
-            local matches = 0
-            for _, kw in ipairs({"chase","aggro","attack","combat",
-                                 "monster","enemy","hostile","hunt",
-                                 "pursue","kill","damage"}) do
-                if n:find(kw, 1, true) then
-                    matches = matches + 1
-                    if matches >= 2 then return true end
-                end
-            end
-        end
-    end
-    return false
-end
-
-local function AI_isHostile(model)
-    if not model or not model:IsA("Model") then return false end
-    if model == character then return false end
-    if Players:GetPlayerFromCharacter(model) then return false end
-
-    local hum = model:FindFirstChildOfClass("Humanoid")
-    if hum and (hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead) then
-        return false
-    end
-    if AI_inFriendlyContainer(model) then return false end
-
-    for _, tag in ipairs(AI_FRIENDLY_TAGS) do
-        if CollectionService:HasTag(model, tag) then
-            if not AI_hasHostileTag(model) then return false end
-        end
-    end
-    if AI_nameHasAny(model.Name, AI_FRIENDLY_KEYWORDS) then
-        if not AI_nameHasAny(model.Name, AI_HOSTILE_NAME_HINTS) then
-            return false
-        end
-    end
-
-    local signals = 0
-    if AI_hasHostileAttribute(model)                    then signals = signals + 1 end
-    if AI_hasHostileTag(model)                          then signals = signals + 1 end
-    if AI_nameHasAny(model.Name, AI_HOSTILE_NAME_HINTS) then signals = signals + 1 end
-    if AI_hasHostileScript(model)                       then signals = signals + 1 end
-    if AI_targetsUs(model, character)                   then signals = signals + 1 end
-
-    return signals >= 1
-end
-
-local function AI_getModelPos(model)
-    local ok, pivot = pcall(function() return model:GetPivot() end)
-    if ok and pivot then return pivot.Position end
-    local root = model:FindFirstChild("HumanoidRootPart")
-             or model:FindFirstChild("RootPart")
-             or model:FindFirstChild("Head")
-    return root and root.Position or nil
-end
-
-local function AI_register(model)
-    if not model or not model:IsA("Model") then return end
-    if AI_registry[model] ~= nil then return end
-    AI_registry[model] = AI_isHostile(model)
-end
-
-local function AI_scanWorkspace()
-    for _, d in ipairs(workspace:GetDescendants()) do
-        if d:IsA("Model") and d:FindFirstChildOfClass("Humanoid") then
-            AI_register(d)
-        end
-    end
-    AI_registryBuilt = true
-end
-
-local function AI_setNoclip(state)
-    if not character then return end
-    for _, part in ipairs(character:GetDescendants()) do
-        if part:IsA("BasePart") then
-            if state then
-                part.CanCollide = false
-                part.CanTouch   = false
-                part.CanQuery   = false
-            else
-                if getgenv().NoclipActive then
-                    part.CanCollide = false
-                else
-                    if part.Name == "HumanoidRootPart"
-                    or part.Name == "UpperTorso"
-                    or part.Name == "LowerTorso"
-                    or part.Name == "Torso" then
-                        part.CanCollide = true
-                    else
-                        part.CanCollide = false
-                    end
-                end
-                part.CanTouch = true
-                part.CanQuery = true
-            end
-        end
-    end
-end
-
-local function AI_startSkyWalk()
-    if not character or not rootPart or not humanoid then return end
-    AI_groundY       = rootPart.Position.Y
-    AI_isSkyWalking  = true
-    humanoid.PlatformStand = true
-    humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-    AI_setNoclip(true)
-    rootPart.CFrame = CFrame.new(rootPart.Position.X, AI_groundY + AI_HEIGHT, rootPart.Position.Z)
-    AI_linearVel = Instance.new("LinearVelocity")
-    AI_linearVel.Name = "AI_SkyWalk_Vel"
-    AI_linearVel.MaxForce       = math.huge
-    AI_linearVel.VectorVelocity = Vector3.zero
-    AI_linearVel.Attachment0    = rootPart.RootAttachment
-    AI_linearVel.Parent         = rootPart
-    AI_bodyPos = Instance.new("BodyPosition")
-    AI_bodyPos.Name = "AI_SkyWalk_Pos"
-    AI_bodyPos.MaxForce = Vector3.new(0, math.huge, 0)
-    AI_bodyPos.P = 10000
-    AI_bodyPos.D = 1000
-    AI_bodyPos.Position = Vector3.new(rootPart.Position.X, AI_groundY + AI_HEIGHT, rootPart.Position.Z)
-    AI_bodyPos.Parent = rootPart
-    warn("[Anti Monster] LIFTING 15 STUDS.")
-end
-
-local function AI_endSkyWalk()
-    if not character or not rootPart or not humanoid then return end
-    AI_isSkyWalking = false
-    if AI_linearVel then AI_linearVel:Destroy() AI_linearVel = nil end
-    if AI_bodyPos   then AI_bodyPos:Destroy()   AI_bodyPos   = nil end
-    local rp = RaycastParams.new()
-    rp.FilterDescendantsInstances = {character}
-    rp.FilterType = Enum.RaycastFilterType.Exclude
-    local res = workspace:Raycast(rootPart.Position + Vector3.new(0,10,0), Vector3.new(0,-500,0), rp)
-    local landY = res and (res.Position.Y + 3.5) or AI_groundY
-    rootPart.CFrame = CFrame.new(rootPart.Position.X, landY, rootPart.Position.Z)
-    rootPart.AssemblyLinearVelocity = Vector3.zero
-    humanoid.PlatformStand = false
-    humanoid:ChangeState(Enum.HumanoidStateType.Running)
-    task.wait(0.1)
-    AI_setNoclip(false)
-    AE_lastPos = rootPart.Position
-    warn("[Anti Monster] DROPPING DOWN.")
-end
-
-function AI_start()
-    if not AI_registryBuilt and character then
-        task.spawn(AI_scanWorkspace)
-    end
-    warn("[Anti Monster] ENABLED")
-end
-
-function AI_stop()
-    if AI_isSkyWalking then AI_endSkyWalk() end
-    warn("[Anti Monster] DISABLED")
-end
-
--- ==========================================
--- HOOK: character respawn
--- ==========================================
-local function AE_onRespawn()
-    AE_reported = {}
-    if getgenv().AntiExploitActive then
-        AE_armCharacter()
-    end
-end
+setupCharacter(player.Character or player.CharacterAdded:Wait())
+player.CharacterAdded:Connect(function(newChar)
+    if linearVelocity then linearVelocity.MaxForce = 0 end
+    task.wait(0.3)
+    setupCharacter(newChar)
+end)
 
 -- ==========================================
 -- MAIN LOOPS
 -- ==========================================
 RunService.Stepped:Connect(function()
-    if not character or not rootPart then return end
+    if not character or not rootPart or not humanoid then return end
 
     if getgenv().NoclipActive then
         if rootPart.Anchored then rootPart.Anchored = false end
-        for _, part in ipairs(character:GetDescendants()) do
-            if part:IsA("BasePart") and isOurBodyPart(part) then
+        for _, part in ipairs(character:GetChildren()) do
+            if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
                 part.CanCollide = false
-                part.CanTouch = false
-                part.CanQuery = false
-            end
-            if part:IsA("BodyForce") or part:IsA("BodyVelocity") or part:IsA("BodyPosition")
-            or part:IsA("VectorForce") or part:IsA("AlignPosition") or part:IsA("LinearVelocity") then
-                if part.Name ~= "FlightVelocity"
-                   and part.Name ~= "AI_SkyWalk_Vel"
-                   and part.Name ~= "AI_SkyWalk_Pos" then
-                    part:Destroy()
-                end
-            end
-        end
-    elseif antiTrapEnabled then
-        local nearLadder = isNearLadder(character)
-        for _, part in ipairs(character:GetDescendants()) do
-            if part:IsA("BasePart") and isOurBodyPart(part) then
-                part.CanTouch = nearLadder and true or false
-                part.CanQuery = nearLadder and true or false
             end
         end
     end
@@ -1659,17 +836,18 @@ RunService.Stepped:Connect(function()
     if noFallDamageEnabled then fall_capVelocity() end
     if rootPart.Position.Y < -50 then absoluteTeleport(getEntrySpawn()) end
 
-    if getgenv().AbsoluteActive then
-        if rootPart.Anchored then rootPart.Anchored = false end
-        for _, p in ipairs(character:GetChildren()) do
-            if p:IsA("BasePart") and p.Anchored and isOurBodyPart(p) then p.Anchored = false end
+    -- Anti-Fling: only smooth velocities way above legit range (800+)
+    if antiFlingEnabled and not isTeleporting and not isFlying
+       and not getgenv().NoclipActive then
+        local vel = rootPart.AssemblyLinearVelocity
+        if vel.Magnitude > MAX_SPEED then
+            rootPart.AssemblyLinearVelocity = vel:Lerp(vel.Unit * MAX_SPEED, SMOOTHING_FACTOR)
         end
-        if humanoid.PlatformStand then humanoid.PlatformStand = false end
-        if humanoid.Sit then humanoid.Sit = false end
+        local angVel = rootPart.AssemblyAngularVelocity
+        if angVel.Magnitude > MAX_ANGULAR then
+            rootPart.AssemblyAngularVelocity = angVel:Lerp(angVel.Unit * MAX_ANGULAR, SMOOTHING_FACTOR)
+        end
     end
-
-    if antiFlingEnabled then AF_tick() end
-    lastPos = rootPart.Position
 end)
 
 RunService.RenderStepped:Connect(function()
@@ -1677,7 +855,9 @@ RunService.RenderStepped:Connect(function()
         camera = workspace.CurrentCamera
         return
     end
-    if isFlying and linearVelocity and humanoid and rootPart then
+    if not character or not rootPart or not humanoid then return end
+
+    if isFlying and linearVelocity then
         if humanoid.FloorMaterial ~= Enum.Material.Air then
             setFlying(false)
         elseif controls then
@@ -1691,232 +871,34 @@ RunService.RenderStepped:Connect(function()
             end
         end
     end
-    if runSpeedEnabled and rootPart and humanoid and not isFlying then
+
+    if runSpeedEnabled and not isFlying then
         local moveDir = humanoid.MoveDirection
         if moveDir.Magnitude > 0 then
             local currentVel = rootPart.AssemblyLinearVelocity
             rootPart.AssemblyLinearVelocity = Vector3.new(moveDir.X * runSpeedValue, currentVel.Y, moveDir.Z * runSpeedValue)
         end
     end
-    if godModeEnabled and humanoid then
+
+    if godModeEnabled then
         if humanoid.Health < IMMORTAL_TARGET_HP then humanoid.Health = IMMORTAL_TARGET_HP end
         if humanoid.MaxHealth < IMMORTAL_MAX_HEALTH then humanoid.MaxHealth = IMMORTAL_MAX_HEALTH end
     end
+
     if noFallDamageEnabled then fall_capVelocity() end
 end)
 
-local AE_acc = 0
-RunService.Heartbeat:Connect(function(dt)
-    if not getgenv().AntiExploitActive then return end
-    if not character or not character.Parent or not rootPart or not humanoid then return end
-    AE_guardPhysics(dt)
-    AE_enforceState()
-    AE_acc = AE_acc + dt
-    local interval = getgenv().AbsoluteActive and 0.05 or 0.2
-    if AE_acc >= interval then
-        AE_acc = 0
-        AE_restoreMotors()
-        AE_cleanForeign()
-        AE_reclaimOwnership()
-        AE_watchNearby()
-    end
-end)
-
 RunService.Heartbeat:Connect(function()
+    if not character or not character.Parent or not rootPart or not humanoid then return end
+    if getgenv().AntiExploitActive then AE_guardPhysics() end
     if getgenv().ImmortalActive then immortal_regen() end
 end)
 
-task.spawn(function()
-    while task.wait(0.5) do
-        if getgenv().ImmortalActive then immortal_apply() end
-    end
-end)
-
-RunService.Heartbeat:Connect(function()
-    if not getgenv().AISkyWalkActive then return end
-    if not character or not rootPart or not humanoid then return end
-    if AI_isSkyWalking and AI_linearVel and AI_bodyPos then
-        AI_setNoclip(true)
-        humanoid.PlatformStand = true
-        AI_linearVel.VectorVelocity = humanoid.MoveDirection * humanoid.WalkSpeed
-        AI_bodyPos.Position = Vector3.new(
-            rootPart.Position.X,
-            AI_groundY + AI_HEIGHT,
-            rootPart.Position.Z
-        )
-    end
-    if humanoid.Health <= 0 then
-        if AI_isSkyWalking then AI_endSkyWalk() end
-        return
-    end
-    local myPos   = rootPart.Position
-    local myPosXZ = Vector3.new(myPos.X, 0, myPos.Z)
-    local closest3D, closestXZ = math.huge, math.huge
-    for model in pairs(AI_registry) do
-        if AI_registry[model] == true then
-            if model.Parent then
-                local hum2 = model:FindFirstChildOfClass("Humanoid")
-                if hum2 and hum2.Health > 0 then
-                    local p = AI_getModelPos(model)
-                    if p then
-                        local d3D = (myPos - p).Magnitude
-                        local dXZ = (myPosXZ - Vector3.new(p.X, 0, p.Z)).Magnitude
-                        if dXZ < closestXZ then closest3D, closestXZ = d3D, dXZ end
-                    end
-                else
-                    AI_registry[model] = nil
-                end
-            else
-                AI_registry[model] = nil
-            end
-        end
-    end
-    if not AI_isSkyWalking then
-        if closest3D <= AI_DANGER_DIST then AI_startSkyWalk() end
-    else
-        if closestXZ >= AI_ESCAPE_DIST then AI_endSkyWalk() end
-    end
-end)
-
-workspace.DescendantAdded:Connect(function(d)
-    if not getgenv().AISkyWalkActive then return end
-    if d:IsA("Humanoid") and d.Parent and d.Parent:IsA("Model") then
-        task.defer(AI_register, d.Parent)
-    end
-    if d:IsA("Model") then task.defer(AI_register, d) end
-end)
-
-workspace.DescendantRemoving:Connect(function(d)
-    if d:IsA("Model") then AI_registry[d] = nil end
-end)
-
-for _, tag in ipairs(AI_HOSTILE_TAGS) do
-    CollectionService:GetInstanceAddedSignal(tag):Connect(function(inst)
-        if not getgenv().AISkyWalkActive then return end
-        local m = inst:IsA("Model") and inst or inst:FindFirstAncestorOfClass("Model")
-        if m then AI_registry[m] = true end
-    end)
-end
-
--- ==========================================
--- CHARACTER SETUP
--- ==========================================
-local function setupCharacter(char)
-    character = char
-    rootPart  = char:WaitForChild("HumanoidRootPart")
-    humanoid  = char:WaitForChild("Humanoid")
-
-    rootPart.CanCollide = false
-    rootPart.Anchored   = false
-
-    if rootPart:FindFirstChild("FlightAttachment") then rootPart.FlightAttachment:Destroy() end
-    if rootPart:FindFirstChild("FlightVelocity")   then rootPart.FlightVelocity:Destroy()   end
-
-    attachment = Instance.new("Attachment")
-    attachment.Name   = "FlightAttachment"
-    attachment.Parent = rootPart
-
-    linearVelocity = Instance.new("LinearVelocity")
-    linearVelocity.Name = "FlightVelocity"
-    linearVelocity.Attachment0 = attachment
-    linearVelocity.RelativeTo   = Enum.ActuatorRelativeTo.World
-    linearVelocity.MaxForce     = 0
-    linearVelocity.VectorVelocity = Vector3.zero
-    linearVelocity.Parent = rootPart
-
-    lastPos = rootPart.Position
-    lastAirborneTime = 0
-    wasAirborne = false
-
-    immortal_hookHumanoid(humanoid)
-    fall_hookHumanoid(humanoid)
-
-    task.defer(function()
-        task.wait(0.3)
-        AF_snapshotPose()
-        AF_lastGoodPos = rootPart and rootPart.Position or nil
-    end)
-
-    if getgenv().ImmortalActive then immortal_apply() end
-    if noFallDamageEnabled then
-        pcall(function() humanoid.FallDamage = 0 end)
-        pcall(function() humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
-    end
-    if getgenv().AntiExploitActive then AE_onRespawn() end
-
-    humanoid.StateChanged:Connect(function(_, newState)
-        if antiFlingEnabled or getgenv().AbsoluteActive then
-            if newState == Enum.HumanoidStateType.Ragdoll
-            or newState == Enum.HumanoidStateType.FallingDown
-            or newState == Enum.HumanoidStateType.Physics
-            or newState == Enum.HumanoidStateType.Dead then
-                task.defer(function()
-                    if humanoid and humanoid.Parent then
-                        if humanoid.FloorMaterial ~= Enum.Material.Air then
-                            pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
-                        else
-                            pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Freefall) end)
-                        end
-                    end
-                end)
-            end
-        end
-    end)
-
-    humanoid:GetPropertyChangedSignal("PlatformStand"):Connect(function()
-        if (antiFlingEnabled or getgenv().AbsoluteActive) and humanoid.PlatformStand then
-            humanoid.PlatformStand = false
-        end
-    end)
-    humanoid:GetPropertyChangedSignal("Sit"):Connect(function()
-        if (antiFlingEnabled or getgenv().AbsoluteActive) and humanoid.Sit then
-            humanoid.Sit = false
-        end
-    end)
-
-    char.DescendantAdded:Connect(function(child)
-        if antiTrapEnabled and child:IsA("BasePart") and isOurBodyPart(child) then
-            if not isNearLadder(char) then
-                child.CanTouch = false
-                child.CanQuery = false
-            end
-        end
-        if antiFlingEnabled or getgenv().AbsoluteActive then
-            -- Only destroy suspicious MOVEMENT actuators.
-            -- Welds / Motor6D / WeldConstraint are NOT destroyed — pets, tools,
-            -- and accessories use those legitimately.
-            if child:IsA("BodyVelocity") or child:IsA("BodyAngularVelocity")
-            or child:IsA("LinearVelocity") or child:IsA("AngularVelocity")
-            or child:IsA("AlignPosition") or child:IsA("AlignOrientation")
-            or child:IsA("RocketPropulsion") or child:IsA("VectorForce") then
-                if child.Name == "FlightVelocity" then return end
-                if child.Name == "AI_SkyWalk_Vel" or child.Name == "AI_SkyWalk_Pos" then return end
-                task.defer(function()
-                    if child and child.Parent then child:Destroy() end
-                end)
-            end
-        end
-    end)
-
-    if antiFlingEnabled or getgenv().AbsoluteActive then
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-    end
-
-    if flyToggleEnabled then setFlying(true) end
-end
-
-setupCharacter(player.Character or player.CharacterAdded:Wait())
-player.CharacterAdded:Connect(function(newChar)
-    if linearVelocity then linearVelocity.MaxForce = 0 end
-    setupCharacter(newChar)
-end)
-
 print("=========================================")
-print("GR33D — OPTIMIZED UI + WORKING ABSOLUTE DEFENSE")
-print("  ✅ Pet/Tool error fixed — only body parts protected")
-print("  📱 Mobile-fit UI + clamped drag")
-print("  👾 Anti Monster — strict detection")
+print("GR33D — SMART DETECTION BUILD")
+print("  ✅ Grapples no longer freeze")
+print("  ✅ Dash abilities work")
+print("  ✅ Exploiter flings still caught")
+print("  ✅ Pets stay glued")
+print("  ✅ Drag + Minimize work")
 print("=========================================")
