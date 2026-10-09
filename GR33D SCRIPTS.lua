@@ -1,4 +1,4 @@
--- GR33D Panel v7.3: fast emergency sensitivity for Position Lock
+-- GR33D Panel v7.5: standalone client lock suspension, multi-angle chase evasion
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -45,12 +45,20 @@ local Config = {
     DamageBurstCount = 2,
     EmergencyHomeDangerHold = 1.4,
     ShieldDiameter = 8,
+    ChaseRelocateCooldown = 0.28, -- do not spin around every scan frame
+    ChaseGuardRadius = 27,
+    ChaseQuietWindow = 1.1,
+    EscapeHoldResponsiveness = 150,
+    EscapeHoldMaxVelocity = 420,
+    EscapeDriftCorrection = 13,
+    ManualRearmDelay = 0.35,
     ManualTeleportLiftSteps = {0, 1.5, 3, 5, 8, 12, 18, 25},
     HazardMargin = 2.5,
     ProjectileSpeedThreshold = 9,
     PredictionSeconds = 1.0,
-    FlingLinearThreshold = 140,
-    FlingAngularThreshold = 60,
+    FlingLinearThreshold = 115,
+    FlingAngularThreshold = 48,
+    FlingRecoveryCooldown = 0.22,
     SafePositionMaxAge = 3,
     FallSpeedLimit = 45,
     FlightSpeed = 50,
@@ -94,6 +102,9 @@ local S = {
         and player:GetAttribute("GR33D_SavedLocation") or nil), entrySpawn = nil, joinSpawn = nil,
     lastDamageAt = -math.huge, damageEvents = {}, lastSevereThreatAt = -math.huge,
     lastEmergency = -math.huge, homeThreatAt = -math.huge,
+    lastFlingRecovery = -math.huge,
+    lockSuspended = false, escapeHold = nil, lastEscapeDriftCorrection = -math.huge,
+    lastChaseRelocate = -math.huge, lastChaseThreatAt = -math.huge,
     impactEntries = {}, recentHazard = nil,
     minimized = false, dragging = nil, suppressMinimizeUntil = -math.huge,
 }
@@ -206,6 +217,8 @@ function H.releaseAll()
     end
     for owner in pairs(owners) do H.release(owner) end
 end
+
+-- Standalone LocalScript. This cannot override authoritative server collision/damage.
 
 function H.zeroVelocity()
     if S.context then
@@ -579,62 +592,69 @@ end
 
 -- This tier is separate from the small 12-24-stud predicted-impact dodge.
 -- It is used for severe/burst damage or abnormally handled disaster objects.
-function H.emergencyEscape(reason)
+function H.emergencyEscape(reason, pursuit)
     if not S.flags.lock or not H.ready() then return false end
     local now = os.clock()
-    local already = S.escape and S.escape.mode == "emergency"
+    local current = S.context.root.CFrame
+    local previous = S.escape
+    local already = previous and previous.mode == "emergency"
+    local home = previous and previous.home or S.lockTarget or current
     if already then
-        -- On additional damage, hold the elevated location longer. Don't jump
-        -- around the sky every scanner frame. Relocate only if the emergency
-        -- destination is still taking hits or has an actual nearby threat.
-        S.escape.earliestReturn = math.max(S.escape.earliestReturn,
-            now + Config.EmergencyMinDuration)
-        S.escape.safeSince = nil
-        if now - S.lastEmergency < Config.EmergencyRetriggerCooldown then
-            return true
-        end
-        if now - S.lastDamageAt > 0.18
-            and not H.findHazard(S.context.root.Position) then
-            return true
-        end
+        previous.earliestReturn = math.max(previous.earliestReturn, now + Config.EmergencyMinDuration)
+        previous.safeSince = nil
+        if now - S.lastEmergency < Config.EmergencyRetriggerCooldown then return true end
+        pursuit = pursuit or H.findSevereHazardNear(current.Position)
+            or H.findHazard(current.Position)
+        -- A new HP drop is enough to shift, even without a named hazard.
+        if not pursuit and now - S.lastDamageAt > 0.28 then return true end
     end
-    local ctx = S.context
-    local origin = ctx.root.CFrame
-    local home = (S.escape and S.escape.home) or S.lockTarget or origin
-    local orientation = home - home.Position
-    local base = home.Position + Vector3.new(0, Config.EmergencyHeight, 0)
-    local offsets = {
-        Vector3.zero,
-        Vector3.new(16, 0, 0), Vector3.new(-16, 0, 0),
-        Vector3.new(0, 0, 16), Vector3.new(0, 0, -16),
-        Vector3.new(24, 10, 0), Vector3.new(-24, 10, 0),
-        Vector3.new(0, 15, 24), Vector3.new(0, 15, -24),
-    }
-    local lastPosition = S.lockTarget and S.lockTarget.Position or nil
+
+    local orientation = current - current.Position
+    local base = already and current.Position or home.Position + Vector3.new(0, Config.EmergencyHeight, 0)
+    local offsets
+    if already then
+        local away = pursuit and (current.Position - pursuit.bounds.Position) or current.LookVector
+        away = Vector3.new(away.X, 0, away.Z)
+        if away.Magnitude < 0.1 then away = Vector3.new(1, 0, 0) end
+        away = away.Unit
+        local side = Vector3.new(-away.Z, 0, away.X)
+        local phase = previous.chaseCount or 0
+        if phase % 2 == 1 then side = -side end
+        offsets = {
+            away * 32 + side * 22 + Vector3.new(0, 13, 0),
+            away * 42 - side * 22 + Vector3.new(0, 17, 0),
+            side * 40 + Vector3.new(0, 22, 0),
+            -side * 40 + Vector3.new(0, 22, 0),
+            away * 52 + Vector3.new(0, 12, 0),
+            Vector3.new(0, 27, 0) + side * 26,
+        }
+    else
+        offsets = {Vector3.zero,
+            Vector3.new(20, 0, 14), Vector3.new(-20, 0, -14),
+            Vector3.new(0, 10, 28), Vector3.new(0, 10, -28),
+            Vector3.new(28, 16, 0), Vector3.new(-28, 16, 0)}
+    end
     for _, offset in ipairs(offsets) do
         local target = CFrame.new(base + offset) * orientation
-        -- If emergency evacuation was already active, try a DIFFERENT safe spot.
-        if not (already and lastPosition and (target.Position - lastPosition).Magnitude < 8) then
-            if H.safeDestination(target) and H.clearEscapePath(target) then
-                local priorTarget = S.lockTarget
-                S.lockTarget = target
-                if H.moveRoot(target) then
-                    S.escape = {home = home, mode = "emergency", reason = reason,
-                        earliestReturn = now + Config.EmergencyMinDuration,
-                        safeSince = nil}
-                    S.lastEmergency, S.lastEscape = now, now
-                    H.notice("EMERGENCY: raised ~100 studs (" .. tostring(reason) .. ")", 4)
-                    return true
-                end
-                S.lockTarget = priorTarget
+        if H.safeDestination(target) and H.clearEscapePath(target) then
+            local count = (previous and previous.chaseCount or 0) + (already and 1 or 0)
+            if H.beginEscapeMove(target, "emergency", home, reason) then
+                S.escape.chaseCount = count
+                S.escape.earliestReturn = now + Config.EmergencyMinDuration
+                S.lastEmergency, S.lastEscape = now, now
+                S.lastChaseRelocate = now
+                H.notice(already and "EMERGENCY: switched escape angle"
+                    or "EMERGENCY: moved approximately 100 studs up", 3)
+                return true
             end
         end
     end
     if already then
-        S.escape.earliestReturn = now + Config.EmergencyMinDuration
-        S.escape.safeSince = nil
+        previous.safeSince = nil
+        H.notice("Chase detected; no clear alternative escape point", 3)
+    else
+        H.notice("Emergency move blocked by local geometry", 3)
     end
-    H.notice("Emergency escape blocked by geometry or server correction", 4)
     return false
 end
 
@@ -716,27 +736,18 @@ function H.escape(hazard, reason)
     end
     away = away.Magnitude > 0.1 and away.Unit or Vector3.new(1, 0, 0)
     local side = Vector3.new(-away.Z, 0, away.X)
-    -- Low, lateral dodges first; no more 110-900 stud sky teleports.
-    local offsets = {
-        side * 12, -side * 12,
-        away * 14, side * 20, -side * 20, away * 24,
+    local offsets = {side * 12, -side * 12, away * 14,
+        side * 20, -side * 20, away * 24,
         Vector3.new(0, Config.EscapeHeight, 0),
         side * 14 + Vector3.new(0, 8, 0),
-        -side * 14 + Vector3.new(0, 8, 0),
-    }
+        -side * 14 + Vector3.new(0, 8, 0)}
     for _, offset in ipairs(offsets) do
         if offset.Magnitude <= Config.MaxEscapeDistance then
             local target = origin + offset
             if H.safeDestination(target) and H.clearEscapePath(target) then
-                S.lastEscape = os.clock()
-                -- Update lock target BEFORE moving, so the physics callback cannot
-                -- overwrite the dodge with the previous anchored position.
-                S.lockTarget = target
-                if H.moveRoot(target) then
-                    S.escape = {home = home, mode = "dodge",
-                        earliestReturn = os.clock() + Config.EscapeMinDuration,
-                        safeSince = nil, reason = reason}
-                    H.notice("Dodged imminent " .. tostring(reason), 3)
+                if H.beginEscapeMove(target, "dodge", home, reason) then
+                    S.lastEscape = os.clock()
+                    H.notice("Dodged " .. tostring(reason) .. "; lock temporarily released", 3)
                     return true
                 end
             end
@@ -786,13 +797,160 @@ function H.ensureShield()
     S.ui.forceField = field
 end
 
-function H.stopLock(tryLanding)
-    if tryLanding and S.escape and H.ready() then
-        local destination = H.safeDestination(S.escape.home) and S.escape.home
-            or H.landingAt(S.context.root.CFrame)
-        if destination then H.moveRoot(destination)
-        else H.notice("Lock off; no safe landing found", 5) end
+-- Temporarily release collision/anchor leases while preserving the ON toggle.
+-- A local AlignPosition holds the actual unanchored rig at the escape position,
+-- rather than continuing to pin body limbs to the original lock point.
+function H.stopEscapeHold()
+    local hold = S.escapeHold
+    S.escapeHold = nil
+    if hold then
+        if hold.position then hold.position:Destroy() end
+        if hold.orientation then hold.orientation:Destroy() end
+        if hold.attachment then hold.attachment:Destroy() end
     end
+end
+
+function H.suspendLock()
+    if not S.flags.lock then return end
+    if not S.lockSuspended then
+        H.release("lock")
+        H.destroyShield() -- local solid shell would fight movement while teleporting
+        S.lockSuspended = true
+    end
+end
+
+function H.ensureEscapeHold(target)
+    if not H.ready() then return false end
+    local root = S.context.root
+    local hold = S.escapeHold
+    if not hold or not hold.attachment or hold.attachment.Parent ~= root then
+        H.stopEscapeHold()
+        local attachment, position, orientation
+        local ok, message = pcall(function()
+            attachment = Instance.new("Attachment")
+            attachment.Name, attachment.Parent = "GR33D_EscapeAttachment", root
+            position = Instance.new("AlignPosition")
+            position.Name = "GR33D_EscapePosition"
+            position.Mode = Enum.PositionAlignmentMode.OneAttachment
+            position.Attachment0 = attachment
+            position.ApplyAtCenterOfMass = true
+            position.MaxForce = math.max(160000, root.AssemblyMass * (Workspace.Gravity * 18 + 1200))
+            position.MaxVelocity = Config.EscapeHoldMaxVelocity
+            position.Responsiveness = Config.EscapeHoldResponsiveness
+            position.Position = target.Position
+            position.Parent = root
+            orientation = Instance.new("AlignOrientation")
+            orientation.Name = "GR33D_EscapeOrientation"
+            orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+            orientation.Attachment0 = attachment
+            orientation.MaxTorque = math.max(120000, root.AssemblyMass * 150000)
+            orientation.MaxAngularVelocity = 45
+            orientation.Responsiveness = 85
+            orientation.CFrame = target - target.Position
+            orientation.Parent = root
+        end)
+        if not ok then
+            if orientation then orientation:Destroy() end
+            if position then position:Destroy() end
+            if attachment then attachment:Destroy() end
+            H.report("Escape stabilization", message)
+            return false
+        end
+        hold = {attachment = attachment, position = position, orientation = orientation}
+        S.escapeHold = hold
+    end
+    hold.position.Position = target.Position
+    hold.orientation.CFrame = target - target.Position
+    return true
+end
+
+function H.beginEscapeMove(target, mode, home, reason)
+    if not S.flags.lock or not H.ready() then return false end
+    local prior = S.escape
+    local wasSuspended = S.lockSuspended
+    local oldTarget = S.lockTarget
+    H.suspendLock() -- unanchor BEFORE PivotTo; this is the key v7.4 fix
+    if not H.moveRoot(target) then
+        if not wasSuspended then
+            S.lockSuspended = false
+            H.applyLock()
+        end
+        return false
+    end
+    H.zeroRigVelocity()
+    local ok, held = pcall(H.ensureEscapeHold, target)
+    if not ok or held ~= true then
+        H.notice("Escape hold unavailable; restoring previous lock", 5)
+        H.stopEscapeHold()
+        S.lockTarget = oldTarget
+        if oldTarget then H.moveRoot(oldTarget) end
+        if wasSuspended and oldTarget then
+            local restored, result = pcall(H.ensureEscapeHold, oldTarget)
+            if restored and result then
+                S.lockSuspended = true
+                return false
+            end
+        end
+        -- If even the previous hold cannot be recovered, do not strand the
+        -- character in a temporary unlocked state with no active stabilizer.
+        S.escape, S.lockSuspended = nil, false
+        H.applyLock()
+        return false
+    end
+    local now = os.clock()
+    S.lockTarget = target
+    S.escape = {home = home, mode = mode, reason = reason,
+        earliestReturn = now + (mode == "emergency" and Config.EmergencyMinDuration
+            or mode == "manual" and Config.ManualRearmDelay or Config.EscapeMinDuration),
+        safeSince = nil,
+        chaseCount = prior and prior.chaseCount or 0,
+        lastThreatAt = prior and prior.lastThreatAt or -math.huge}
+    return true
+end
+
+function H.rearmLockAt(target)
+    if not H.ready() or not S.flags.lock then return false end
+    H.stopEscapeHold()
+    if not H.moveRoot(target) then
+        if S.lockTarget then H.ensureEscapeHold(S.lockTarget) end
+        return false
+    end
+    S.lockTarget, S.escape, S.lockSuspended = target, nil, false
+    H.applyLock()
+    return true
+end
+
+function H.updateEscapeHold()
+    if not S.escape or not H.ready() then return end
+    H.suspendLock()
+    local target = S.lockTarget
+    local ok, held = pcall(H.ensureEscapeHold, target)
+    if not ok or held ~= true then
+        H.notice("Escape stabilizer unavailable; check Output", 4)
+        return
+    end
+    -- If another local controller displaced the rig, try one correction.
+    -- Server-owned displacement cannot be overridden with a LocalScript.
+    local now = os.clock()
+    if (S.context.root.Position - target.Position).Magnitude > Config.EscapeDriftCorrection
+        and now - (S.lastEscapeDriftCorrection or -math.huge) > 0.3 then
+        S.lastEscapeDriftCorrection = now
+        H.moveRoot(target)
+        H.zeroRigVelocity()
+    end
+end
+
+function H.stopLock(tryLanding)
+    -- Turning OFF must cancel the temporary hold before dropping the player.
+    local landing = nil
+    if tryLanding and S.escape and H.ready() then
+        landing = H.safeDestination(S.escape.home) and S.escape.home
+            or H.landingAt(S.context.root.CFrame)
+        if not landing then H.notice("Lock off; no safe landing found", 5) end
+    end
+    H.stopEscapeHold()
+    if landing then H.moveRoot(landing) end
+    S.lockSuspended = false
     S.lockTarget, S.escape = nil, nil
     H.destroyShield()
     H.release("lock")
@@ -809,10 +967,53 @@ local BODY_PART_NAMES = {
     ["Left Leg"] = true, ["Right Leg"] = true,
 }
 
+local FLING_STATES = {
+    Enum.HumanoidStateType.Ragdoll,
+    Enum.HumanoidStateType.FallingDown,
+    Enum.HumanoidStateType.Physics,
+    Enum.HumanoidStateType.PlatformStanding,
+}
+
+function H.zeroRigVelocity()
+    if not S.context then return end
+    for _, part in ipairs(S.context.character:GetChildren()) do
+        if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
+            pcall(function()
+                part.AssemblyLinearVelocity = Vector3.zero
+                part.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+end
+
+function H.recoverRagdoll()
+    if not H.ready() or not (S.flags.fling or S.flags.lock) then return end
+    if (S.flying or S.hovering) and not S.flags.lock then return end
+    local humanoid = S.context.humanoid
+    if S.flags.fling then
+        for _, state in ipairs(FLING_STATES) do H.claimState(humanoid, state, false, "fling") end
+    end
+    if S.flags.lock then
+        for _, state in ipairs(FLING_STATES) do H.claimState(humanoid, state, false, "lock") end
+    end
+    if humanoid.PlatformStand then humanoid.PlatformStand = false end
+    if humanoid.Sit then humanoid.Sit = false end
+    local state = humanoid:GetState()
+    if state == Enum.HumanoidStateType.Ragdoll
+        or state == Enum.HumanoidStateType.FallingDown
+        or state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.PlatformStanding then
+        humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+    end
+end
+
 function H.applyLock()
     if not S.flags.lock or not H.ready() then return end
+    -- During dodge/emergency/manual teleport, NEVER re-anchor the rig.
+    if S.lockSuspended or S.escape then return end
     local ctx = S.context
     if not S.lockTarget then S.lockTarget = ctx.root.CFrame end
+    S.lockSuspended = false
     -- Anchor R6/R15 body parts as in the reference; preserve the ORIGINAL property
     -- for each part so turning Lock OFF can restore it without damaging the rig.
     for _, part in ipairs(ctx.character:GetChildren()) do
@@ -845,40 +1046,72 @@ function H.updateEscape()
     local now = os.clock()
     local position = S.context.root.Position
     local home = S.escape and S.escape.home or S.lockTarget
-    -- Emergency detection has priority over ordinary dodge. It also checks
-    -- the original position, not only the current (possibly elevated) avatar.
-    local severe = home and H.findSevereHazardNear(home.Position)
-    if severe then
+    local severeAtHome = home and H.findSevereHazardNear(home.Position)
+    if severeAtHome then
         S.lastSevereThreatAt, S.homeThreatAt = now, now
-        if not S.escape or S.escape.mode ~= "emergency" then
-            if H.emergencyEscape(severe.name .. " grabbed / abnormal movement") then
+        if not S.escape or S.escape.mode == "dodge" then
+            if H.emergencyEscape(severeAtHome.name .. " abnormal movement", severeAtHome) then
                 return
             end
         end
     end
-    if home and S.escape and S.escape.mode == "emergency" then
-        if H.nearHazard(home.Position, Config.EmergencyGuardRadius) then
-            S.homeThreatAt = now
-        end
+    if S.escape then H.updateEscapeHold() end
+    if home and S.escape and S.escape.mode == "emergency"
+        and H.nearHazard(home.Position, Config.EmergencyGuardRadius) then
+        S.homeThreatAt = now
     end
+
     local threat = H.findHazard(position)
-    if threat then
+    local pursuing = S.escape and (H.findSevereHazardNear(position)
+        or threat or H.nearHazard(position, Config.ChaseGuardRadius))
+    if pursuing then
+        S.lastChaseThreatAt = now
+        S.escape.lastThreatAt = now
+        S.escape.safeSince = nil
+        if now - S.lastChaseRelocate >= Config.ChaseRelocateCooldown then
+            if S.escape.mode == "emergency" then
+                H.emergencyEscape("pursuing " .. pursuing.name, pursuing)
+            elseif S.escape.mode == "dodge" and H.isSevereThreat(pursuing, position) then
+                H.emergencyEscape("pursuing " .. pursuing.name, pursuing)
+            elseif S.escape.mode == "dodge" then
+                -- A continuing projectile near the new spot: evade diagonally,
+                -- and escalate if no safe small-shift is available.
+                local away = position - pursuing.bounds.Position
+                away = Vector3.new(away.X, 0, away.Z)
+                away = away.Magnitude > 0.1 and away.Unit or Vector3.new(1, 0, 0)
+                local side = Vector3.new(-away.Z, 0, away.X)
+                local target = S.context.root.CFrame + away * 18 + side * 15 + Vector3.new(0, 7, 0)
+                if H.safeDestination(target) and H.clearEscapePath(target) then
+                    H.beginEscapeMove(target, "dodge", S.escape.home, pursuing.name)
+                    S.lastChaseRelocate = now
+                else
+                    H.emergencyEscape("repeated " .. pursuing.name, pursuing)
+                end
+            end
+        end
+    elseif threat then
+        S.recentHazard = threat
+    end
+
+    if not S.escape and threat then
         S.recentHazard = threat
         if H.isSevereThreat(threat, position) or H.recordContact(threat) then
             S.lastSevereThreatAt = now
-            H.emergencyEscape(threat.name .. " abnormal contact")
-        elseif not S.escape then
+            H.emergencyEscape(threat.name .. " abnormal contact", threat)
+        else
             H.escape(threat, threat.name)
-        elseif S.escape.mode == "dodge" and now - S.lastDamageAt < 1.8 then
-            H.emergencyEscape(threat.name .. " repeated damage")
         end
     end
     if not S.escape then return end
     if now < S.escape.earliestReturn then return end
+    -- Cannot safely re-arm while a hazard is still following the airborne rig.
+    if now - math.max(S.lastChaseThreatAt, S.escape.lastThreatAt or -math.huge)
+        < Config.ChaseQuietWindow then
+        S.escape.safeSince = nil
+        return
+    end
     local safeHome = H.safeDestination(S.escape.home)
     if S.escape.mode == "emergency" then
-        -- If a dangerous object is moving around the player's origin, keep
-        -- waiting even between collisions; do not bounce back into the slam.
         if H.nearHazard(S.escape.home.Position, Config.EmergencyGuardRadius) then
             S.homeThreatAt = now
             safeHome = false
@@ -893,17 +1126,13 @@ function H.updateEscape()
         return
     end
     S.escape.safeSince = S.escape.safeSince or now
-    local grace = S.escape.mode == "emergency"
-        and Config.EmergencyReturnQuiet or Config.ReturnSafeGrace
+    local grace = S.escape.mode == "emergency" and Config.EmergencyReturnQuiet
+        or S.escape.mode == "manual" and Config.ManualRearmDelay
+        or Config.ReturnSafeGrace
     if now - S.escape.safeSince < grace then return end
     local destination = S.escape.home
-    local originalTarget = S.lockTarget
-    S.lockTarget = destination
-    if H.moveRoot(destination) then
-        S.escape = nil
-        H.notice("Returned after home remained safe", 3)
-    else
-        S.lockTarget = originalTarget
+    if H.rearmLockAt(destination) then
+        H.notice("Returned to safe position; lock restored", 3)
     end
 end
 
@@ -1069,25 +1298,34 @@ function H.updateMover()
 end
 
 function H.updateFling()
-    if not S.flags.fling or not H.ready() then return end
+    if not H.ready() or not (S.flags.fling or S.flags.lock) then return end
     local ctx = S.context
-    H.claimState(ctx.humanoid, Enum.HumanoidStateType.Ragdoll, false, "fling")
-    H.claimState(ctx.humanoid, Enum.HumanoidStateType.FallingDown, false, "fling")
+    H.recoverRagdoll()
     if S.flags.lock or S.flying or S.hovering or ctx.root.Anchored
         or ctx.character:GetAttribute("ProtectionAllowHighVelocity") == true then return end
-    local state = ctx.humanoid:GetState()
-    if state == Enum.HumanoidStateType.Ragdoll or state == Enum.HumanoidStateType.FallingDown then
-        ctx.humanoid.PlatformStand = false
-        ctx.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+    local limit = math.max(Config.FlingLinearThreshold,
+        S.flags.run and S.runSpeed + 40 or 0)
+    local bad = false
+    -- A fling can start in an arm or leg while HumanoidRootPart remains slow.
+    for _, part in ipairs(ctx.character:GetChildren()) do
+        if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
+            local linear, angular = part.AssemblyLinearVelocity, part.AssemblyAngularVelocity
+            if not H.finiteVector(linear) or not H.finiteVector(angular)
+                or linear.Magnitude > limit or angular.Magnitude > Config.FlingAngularThreshold then
+                bad = true
+                break
+            end
+        end
     end
-    local linear, angular = ctx.root.AssemblyLinearVelocity, ctx.root.AssemblyAngularVelocity
-    local limit = math.max(Config.FlingLinearThreshold, S.flags.run and S.runSpeed + 40 or 0)
-    local invalid = not H.finiteVector(linear) or not H.finiteVector(angular)
-    if invalid or linear.Magnitude > limit or angular.Magnitude > Config.FlingAngularThreshold then
-        H.zeroVelocity()
-        if S.safeRoot and os.clock() - S.safeTime <= Config.SafePositionMaxAge
+    local now = os.clock()
+    if bad and now - S.lastFlingRecovery >= Config.FlingRecoveryCooldown then
+        S.lastFlingRecovery = now
+        H.zeroRigVelocity()
+        H.recoverRagdoll()
+        -- A recent known-ground position prevents flying into arbitrary terrain.
+        if S.safeRoot and now - S.safeTime <= Config.SafePositionMaxAge
             and H.safeDestination(S.safeRoot) then H.moveRoot(S.safeRoot) end
-        H.notice("Excessive physics motion corrected", 2)
+        H.notice("Abnormal rig impulse damped (anti-fling)", 2)
     end
 end
 
@@ -1123,7 +1361,6 @@ function H.teleport(target, label)
         return false
     end
     local chosen
-    -- Prefer the exact saved spot. Only lift if the spot has become obstructed.
     for _, lift in ipairs(Config.ManualTeleportLiftSteps) do
         local candidate = target + Vector3.new(0, lift, 0)
         if H.safeDestination(candidate) then chosen = candidate; break end
@@ -1137,21 +1374,23 @@ function H.teleport(target, label)
     S.idleTarget, S.idleSince = nil, nil
     local oldLock, oldEscape = S.lockTarget, S.escape
     if S.flags.lock then
-        S.lockTarget, S.escape = chosen, nil
+        if not H.beginEscapeMove(chosen, "manual", chosen, label) then
+            S.lockTarget, S.escape = oldLock, oldEscape
+            H.notice("Teleport move failed", 4)
+            return false
+        end
         S.damageEvents, S.impactEntries = {}, {}
-    end
-    if not H.moveRoot(chosen) then
-        if S.flags.lock then S.lockTarget, S.escape = oldLock, oldEscape end
+    elseif not H.moveRoot(chosen) then
         H.notice("Teleport move failed", 4)
         return false
     end
     S.safeRoot, S.safeTime = chosen, os.clock()
     H.notice("TP to " .. tostring(label or "destination") .. " requested", 3)
     local ctx = S.context
-    task.delay(0.65, function()
-        if S.alive and ctx == S.context and ctx.root.Parent and not S.escape
-            and (ctx.root.Position - chosen.Position).Magnitude > 12 then
-            H.notice("Teleport did not persist; server may be correcting it", 5)
+    task.delay(0.75, function()
+        if S.alive and ctx == S.context and ctx.root.Parent
+            and (ctx.root.Position - chosen.Position).Magnitude > 16 then
+            H.notice("Server may be correcting client-only teleport", 5)
         end
     end)
     return true
@@ -1216,7 +1455,10 @@ function H.setToggle(key, enabled)
         if key == "lock" then
             if enabled then
                 H.release("idle"); S.idleTarget, S.idleSince = nil, nil
+                H.stopEscapeHold()
+                S.lockSuspended = false
                 S.lockTarget, S.escape, S.lastEscape = S.context.root.CFrame, nil, -math.huge
+                S.lastChaseRelocate, S.lastChaseThreatAt = -math.huge, -math.huge
                 H.applyLock()
             else H.stopLock(true) end
         elseif key == "flight" then
@@ -1227,7 +1469,7 @@ function H.setToggle(key, enabled)
         elseif key == "noclip" then
             if enabled then H.noclip("noclip", true) else H.release("noclip") end
         elseif key == "fling" then
-            if not enabled then H.release("fling") end
+            if enabled then H.recoverRagdoll() else H.release("fling") end
         elseif key == "idle" then
             H.release("idle"); S.idleTarget, S.idleSince = nil, nil
         elseif key == "health" and enabled then
@@ -1261,6 +1503,9 @@ function H.cleanupCharacter()
     S.lastDamageAt, S.lastSevereThreatAt = -math.huge, -math.huge
     S.homeThreatAt, S.lastEmergency = -math.huge, -math.huge
     S.damageEvents, S.impactEntries, S.recentHazard = {}, {}, nil
+    S.lastFlingRecovery = -math.huge
+    S.lockSuspended, S.escapeHold = false, nil
+    S.lastChaseRelocate, S.lastChaseThreatAt = -math.huge, -math.huge
 end
 
 function H.beginCharacter(character)
@@ -1300,6 +1545,30 @@ function H.beginCharacter(character)
                 if S.context == ctx then H.cleanupCharacter(); H.notice("Character components removed", 4) end
             end
         end, S.characterConnections)
+        -- Reference v6.1 used property listeners as well as state-disable calls.
+        -- Apply on each character (R6 or R15); cleaned on respawn.
+        H.connect(humanoid:GetPropertyChangedSignal("PlatformStand"), function()
+            if S.context == ctx and (S.flags.fling or S.flags.lock)
+                and not S.hovering and not S.flying and humanoid.PlatformStand then
+                H.recoverRagdoll()
+            end
+        end, S.characterConnections)
+        H.connect(humanoid:GetPropertyChangedSignal("Sit"), function()
+            if S.context == ctx and (S.flags.fling or S.flags.lock)
+                and not S.hovering and not S.flying and humanoid.Sit then
+                H.recoverRagdoll()
+            end
+        end, S.characterConnections)
+        H.connect(humanoid.StateChanged, function(_, newState)
+            if S.context ~= ctx or not (S.flags.fling or S.flags.lock) then return end
+            if newState == Enum.HumanoidStateType.Ragdoll
+                or newState == Enum.HumanoidStateType.FallingDown
+                or newState == Enum.HumanoidStateType.Physics
+                or newState == Enum.HumanoidStateType.PlatformStanding then
+                H.recoverRagdoll()
+            end
+        end, S.characterConnections)
+        H.recoverRagdoll()
         H.connect(humanoid.HealthChanged, function(health)
             if S.context ~= ctx then return end
             local previous = S.previousHealth or health
@@ -1451,7 +1720,7 @@ S.ui.panel = H.make("Frame", {Name = "MainFrame", Active = true, BackgroundColor
 H.corner(S.ui.panel, 12)
 H.make("UIStroke", {Thickness = 1, Color = Color3.fromRGB(61, 72, 95)}, S.ui.panel)
 S.ui.title = H.make("TextLabel", {Active = true, Size = UDim2.new(1, -82, 0, 43), Position = UDim2.fromOffset(12, 0),
-    BackgroundTransparency = 1, Text = "GR33D  v7.2", TextColor3 = Color3.fromRGB(234, 240, 250),
+    BackgroundTransparency = 1, Text = "GR33D  v7.5", TextColor3 = Color3.fromRGB(234, 240, 250),
     TextSize = 14, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left}, S.ui.panel)
 S.ui.minimize = H.make("TextButton", {Text = "-", BackgroundColor3 = Color3.fromRGB(37, 43, 57),
     TextColor3 = Color3.fromRGB(234, 240, 250), TextSize = 19, Font = Enum.Font.GothamBold}, S.ui.panel)
@@ -1627,7 +1896,10 @@ function H.physicsTick()
     local ctx = S.context
     H.applyCollision()
     H.updateFling()
-    if S.flags.lock then H.applyLock(); return end
+    if S.flags.lock then
+        if S.escape then H.updateEscapeHold() else H.applyLock() end
+        return
+    end
     H.updateIdle()
     if S.mover then H.updateMover(); return end
     if ctx.root.Anchored then return end
@@ -1665,6 +1937,13 @@ H.connect(RunService.PreSimulation, function()
     end
 end)
 
+H.connect(RunService.PostSimulation, function()
+    if S.flags.fling and H.ready() then
+        local ok, message = pcall(H.updateFling)
+        if not ok then H.report("Post-physics anti-fling", message) end
+    end
+end)
+
 H.connect(RunService.Heartbeat, function(deltaTime)
     if not S.alive then return end
     -- Initial indexing is spread across frames instead of blocking on a large map.
@@ -1698,8 +1977,10 @@ H.connect(RunService.Heartbeat, function(deltaTime)
         elseif not H.ready() then S.ui.status.Text = "Waiting for a living character"
         elseif S.pendingIndex <= #S.pending then S.ui.status.Text = "Indexing hazards and NPCs..."
         elseif S.escape and S.escape.mode == "emergency" then
-            S.ui.status.Text = "EMERGENCY +100 studs; watching original spot for safety"
-        elseif S.escape then S.ui.status.Text = "Dodge active; waiting for safe return"
+            S.ui.status.Text = "Emergency evasion: lock released; tracking pursuit"
+        elseif S.escape and S.escape.mode == "manual" then
+            S.ui.status.Text = "Teleporting: lock temporarily released"
+        elseif S.escape then S.ui.status.Text = "Dodging: lock released; waiting for safety"
         elseif S.flags.lock then S.ui.status.Text = "Position locked - client protection"
         elseif S.flying then S.ui.status.Text = "Flying - double-tap jump to stop"
         elseif S.hovering then S.ui.status.Text = "Evading a hostile NPC"
@@ -1708,4 +1989,4 @@ H.connect(RunService.Heartbeat, function(deltaTime)
 end)
 
 H.updateSwitches()
-print("[GR33D v7.3] Sensitive HP emergency, fast abnormal-threat detection, unchanged small dodge and flight (client-only).")
+print("[GR33D v7.5] Standalone client: lock pauses for escape, re-angles if pursued, rearms when safe. Flight preserved.")
