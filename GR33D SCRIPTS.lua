@@ -1,4 +1,4 @@
--- GR33D Panel v7.5: standalone client lock suspension, multi-angle chase evasion
+-- GR33D Panel v7.7: anti-fling stationary guard + pre/post physics correction; AFK Streak, flight, and escape retained
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -56,9 +56,15 @@ local Config = {
     HazardMargin = 2.5,
     ProjectileSpeedThreshold = 9,
     PredictionSeconds = 1.0,
-    FlingLinearThreshold = 115,
-    FlingAngularThreshold = 48,
-    FlingRecoveryCooldown = 0.22,
+    FlingLinearThreshold = 72, -- ordinary movement still permitted up to Run Speed + margin
+    FlingAngularThreshold = 20,
+    FlingRecoveryCooldown = 0.05, -- rate-limit notices, not actual protection
+    FlingImpulseDeltaThreshold = 26, -- suspicious single-step speed change (studs/s)
+    FlingFrameDistance = 5.5, -- unusually large displacement in one simulation step
+    FlingStationaryMaxSpeed = 4.5,
+    FlingStationaryMaxVertical = 7,
+    FlingGroundSnapshotAge = 0.55,
+    FlingInputReleaseGrace = 0.30,
     SafePositionMaxAge = 3,
     FallSpeedLimit = 45,
     FlightSpeed = 50,
@@ -70,7 +76,14 @@ local Config = {
     NPCStopDistance = 25,
     NPCLiftHeight = 15,
     NPCLiftCooldown = 1.5,
-    IdleSettleTime = 0.6,
+    IdleSettleTime = 0.55,
+    IdleSettleRadius = 1.8, -- small rig/physics jitter does not reset the idle timer
+    IdleMaxHorizontalSpeed = 4.5,
+    IdleInputGrace = 0.28,
+    IdleMovingPlatformSpeed = 1.25,
+    AFKPulsingInterval = 18,
+    AFKPulsingDuration = 0.16,
+    AFKMovementPulse = 0.025,
     -- Broad 'Disaster'/'Volcano' labels do NOT imply an imminent impact.
     HazardTags = {"ProtectionHazard", "Hazard", "Disaster", "Nuke", "NuclearMissile",
         "Tsunami", "TsunamiWave", "Lightning", "C4Bomb", "Volcano", "Meteor",
@@ -95,7 +108,9 @@ local S = {
     properties = {}, states = {}, flags = {}, switches = {}, ui = {}, cameraConnection = nil,
     controls = nil, runSpeed = 50, flying = false, hovering = false, mover = nil,
     lockTarget = nil, escape = nil, lastEscape = -math.huge, idleTarget = nil,
-    idleSince = nil, safeRoot = nil, safeTime = -math.huge, hoverY = nil,
+    idleSince = nil, idleSample = nil, idleBlockedUntil = -math.huge,
+    afkLastPulse = os.clock(), afkPulseUntil = nil, afkPostPulseUntil = -math.huge,
+    safeRoot = nil, safeTime = -math.huge, hoverY = nil,
     lastDrop = -math.huge, previousHealth = nil, healing = false, lastJump = -math.huge,
     lastJumpRequest = -math.huge, scanClock = 0, notice = "Client panel ready", noticeUntil = 0,
     savedLocation = (typeof(player:GetAttribute("GR33D_SavedLocation")) == "CFrame"
@@ -103,13 +118,16 @@ local S = {
     lastDamageAt = -math.huge, damageEvents = {}, lastSevereThreatAt = -math.huge,
     lastEmergency = -math.huge, homeThreatAt = -math.huge,
     lastFlingRecovery = -math.huge,
+    flingHoldTarget = nil, flingPauseUntil = -math.huge, flingInputUntil = -math.huge,
+    flingSnapshot = nil, flingLastStableCF = nil, flingLastStableAt = -math.huge,
+    flingRecovering = false,
     lockSuspended = false, escapeHold = nil, lastEscapeDriftCorrection = -math.huge,
     lastChaseRelocate = -math.huge, lastChaseThreatAt = -math.huge,
     impactEntries = {}, recentHazard = nil,
     minimized = false, dragging = nil, suppressMinimizeUntil = -math.huge,
 }
 local H = {}
-for _, key in ipairs({"flight", "health", "fall", "noclip", "fling", "trap", "run", "lock", "monster", "idle"}) do
+for _, key in ipairs({"flight", "health", "fall", "noclip", "fling", "trap", "run", "lock", "monster", "afk"}) do
     S.flags[key] = false
 end
 
@@ -1157,7 +1175,8 @@ end
 function H.startMover(kind)
     if not H.ready() or S.flags.lock then return false end
     H.release("idle")
-    S.idleTarget, S.idleSince = nil, nil
+    S.idleTarget, S.idleSince, S.idleSample = nil, nil, nil
+    S.idleBlockedUntil = os.clock() + Config.IdleInputGrace
     if S.context.root.Anchored then return false end
     H.stopMover()
     local ctx = S.context
@@ -1297,57 +1316,306 @@ function H.updateMover()
     S.mover.velocity.VectorVelocity = direction
 end
 
-function H.updateFling()
-    if not H.ready() or not (S.flags.fling or S.flags.lock) then return end
-    local ctx = S.context
-    H.recoverRagdoll()
-    if S.flags.lock or S.flying or S.hovering or ctx.root.Anchored
-        or ctx.character:GetAttribute("ProtectionAllowHighVelocity") == true then return end
-    local limit = math.max(Config.FlingLinearThreshold,
-        S.flags.run and S.runSpeed + 40 or 0)
-    local bad = false
-    -- A fling can start in an arm or leg while HumanoidRootPart remains slow.
-    for _, part in ipairs(ctx.character:GetChildren()) do
-        if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
-            local linear, angular = part.AssemblyLinearVelocity, part.AssemblyAngularVelocity
-            if not H.finiteVector(linear) or not H.finiteVector(angular)
-                or linear.Magnitude > limit or angular.Magnitude > Config.FlingAngularThreshold then
-                bad = true
-                break
-            end
-        end
+-- Shield against locally simulated flings without freezing ordinary movement.
+-- While truly idle on stable ground, anchor only the root assembly (not every
+-- limb: anchoring all limbs splits physical assemblies and breaks animations).
+function H.releaseFlingHold(grace)
+    if S.flingHoldTarget then
+        H.release("fling_hold")
+        S.flingHoldTarget = nil
     end
-    local now = os.clock()
-    if bad and now - S.lastFlingRecovery >= Config.FlingRecoveryCooldown then
-        S.lastFlingRecovery = now
-        H.zeroRigVelocity()
-        H.recoverRagdoll()
-        -- A recent known-ground position prevents flying into arbitrary terrain.
-        if S.safeRoot and now - S.safeTime <= Config.SafePositionMaxAge
-            and H.safeDestination(S.safeRoot) then H.moveRoot(S.safeRoot) end
-        H.notice("Abnormal rig impulse damped (anti-fling)", 2)
+    if grace and grace > 0 then
+        S.flingPauseUntil = math.max(S.flingPauseUntil, os.clock() + grace)
     end
 end
 
-function H.updateIdle()
-    if not S.flags.idle or not H.ready() then H.release("idle"); return end
-    local ctx = S.context
-    local state = ctx.humanoid:GetState()
+function H.flingMovementInput(ctx)
+    local now = os.clock()
     local input = H.inputMoveVector()
-    local moving = ctx.humanoid.MoveDirection.Magnitude > 0.01 or (input and input.Magnitude > 0.01)
-    if moving or ctx.humanoid.Jump or ctx.humanoid.Sit or ctx.humanoid.PlatformStand
-        or state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
-        or ctx.humanoid.FloorMaterial == Enum.Material.Air or S.flags.lock or S.mover then
-        H.release("idle"); S.idleTarget, S.idleSince = nil, nil; return
+    local synthetic = S.afkPulseUntil ~= nil or now < S.afkPostPulseUntil
+    return now < S.flingInputUntil or (input and input.Magnitude > 0.06)
+        or (not synthetic and ctx.humanoid.MoveDirection.Magnitude > 0.06)
+        or ctx.humanoid.Jump == true
+end
+
+function H.flingCanOperate(ctx)
+    -- Important: never fight Lock On's temporary escape, voluntary flight,
+    -- hover, teleporting, or another feature's movement constraint.
+    return S.flags.fling and not S.flags.lock and not S.escape
+        and not S.mover and not S.flying and not S.hovering
+        and ctx.character:GetAttribute("ProtectionAllowHighVelocity") ~= true
+end
+
+function H.flingRestore(reason, fallback)
+    local ctx = S.context
+    if not ctx or S.flingRecovering then return end
+    S.flingRecovering = true
+    -- Velocity neutralization happens on every detected impact, not just once
+    -- per cooldown. The cooldown only limits notification spam.
+    H.zeroRigVelocity()
+    H.recoverRagdoll()
+    local now = os.clock()
+    local target = fallback
+    if not target and S.flingLastStableCF
+        and now - S.flingLastStableAt <= Config.FlingGroundSnapshotAge then
+        target = S.flingLastStableCF
     end
+    if target and H.finiteVector(target.Position)
+        and (ctx.root.Position - target.Position).Magnitude < 38
+        and H.safeDestination(target) then
+        H.moveRoot(target)
+    end
+    S.flingSnapshot = nil
+    if now - S.lastFlingRecovery >= 1 then
+        S.lastFlingRecovery = now
+        H.notice("Anti-Fling: " .. tostring(reason) .. " corrected locally", 2)
+    end
+    S.flingRecovering = false
+end
+
+function H.updateFling(phase, deltaTime)
+    if not H.ready() or not (S.flags.fling or S.flags.lock) then
+        H.releaseFlingHold()
+        return
+    end
+    local ctx = S.context
+    local humanoid, root = ctx.humanoid, ctx.root
+    -- Capture the forced state BEFORE recovery changes it to GettingUp;
+    -- otherwise the high-priority position correction can be skipped.
+    local stateBefore = humanoid:GetState()
+    local wasForced = stateBefore == Enum.HumanoidStateType.Ragdoll
+        or stateBefore == Enum.HumanoidStateType.Physics
+        or stateBefore == Enum.HumanoidStateType.FallingDown
+        or stateBefore == Enum.HumanoidStateType.PlatformStanding
+        or humanoid.PlatformStand or humanoid.Sit
+    H.recoverRagdoll()
+    if not H.flingCanOperate(ctx) then
+        H.releaseFlingHold()
+        S.flingSnapshot = nil
+        return
+    end
+
+    local now = os.clock()
+    local state = humanoid:GetState()
+    local forcedState = wasForced or state == Enum.HumanoidStateType.Ragdoll
+        or state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.FallingDown
+        or state == Enum.HumanoidStateType.PlatformStanding
+        or humanoid.PlatformStand or humanoid.Sit
+    local hasInput = H.flingMovementInput(ctx)
+    local grounded, movingPlatform = H.idleGroundInfo(ctx)
+    local canHold = now >= S.flingPauseUntil and not hasInput
+        and not forcedState and grounded and not movingPlatform
+        and not S.flags.noclip and not S.flying and not S.hovering
+        and state ~= Enum.HumanoidStateType.Jumping
+        and state ~= Enum.HumanoidStateType.Climbing
+        and state ~= Enum.HumanoidStateType.Swimming
+        and state ~= Enum.HumanoidStateType.Seated
+        and not (S.flags.afk and S.idleTarget) -- AFK Streak owns that hold
+
+    if S.flingHoldTarget then
+        if not canHold then
+            H.releaseFlingHold(hasInput and Config.FlingInputReleaseGrace or nil)
+        else
+            -- Keep the same exact place even during light repeated contact.
+            H.claim(root, "Anchored", true, "fling_hold")
+            if (root.Position - S.flingHoldTarget.Position).Magnitude > 0.08 then
+                H.moveRoot(S.flingHoldTarget)
+            end
+            H.zeroRigVelocity()
+            S.flingSnapshot = nil
+            return
+        end
+    end
+
+    local linear, angular = root.AssemblyLinearVelocity, root.AssemblyAngularVelocity
+    local finite = H.finiteVector(linear) and H.finiteVector(angular)
+    local limit = math.max(Config.FlingLinearThreshold,
+        S.flags.run and S.runSpeed + 30 or 0,
+        humanoid.WalkSpeed + 30)
+    local bad = not finite
+    if finite then
+        if linear.Magnitude > limit or angular.Magnitude > Config.FlingAngularThreshold then
+            bad = true
+        end
+    end
+    -- Check parts as well as the root: constraints can transfer a fling through
+    -- the limbs while the root still reports an ordinary velocity.
+    if not bad then
+        for _, part in ipairs(ctx.character:GetChildren()) do
+            if part:IsA("BasePart") and BODY_PART_NAMES[part.Name] then
+                local v, w = part.AssemblyLinearVelocity, part.AssemblyAngularVelocity
+                if not H.finiteVector(v) or not H.finiteVector(w)
+                    or v.Magnitude > limit or w.Magnitude > Config.FlingAngularThreshold then
+                    bad = true
+                    break
+                end
+            end
+        end
+    end
+    local previous = S.flingSnapshot
+    if not bad and phase == "post" and previous and finite then
+        local dt = math.clamp(deltaTime or 1 / 60, 1 / 240, 0.12)
+        local velocityJump = (linear - previous.velocity).Magnitude
+        local positionJump = (root.Position - previous.cframe.Position).Magnitude
+        local expectedMovement = (S.flags.run and S.runSpeed or humanoid.WalkSpeed) * dt
+        -- Ignore large acceleration if controlled movement is already ongoing,
+        -- but never ignore extreme spins / impulses in avatar body parts.
+        if not hasInput and not humanoid.Jump and velocityJump > Config.FlingImpulseDeltaThreshold then
+            bad = true
+        elseif positionJump > math.max(Config.FlingFrameDistance, expectedMovement + 3.5)
+            and not hasInput then
+            bad = true
+        end
+    end
+    if bad or forcedState then
+        H.flingRestore(forcedState and "ragdoll" or "unexpected impulse",
+            previous and previous.cframe or nil)
+        return
+    end
+
+    if phase == "pre" then
+        -- The most recent pre-physics pose is our safest non-lagging recovery
+        -- point. Do not copy an already violent velocity into the snapshot.
+        S.flingSnapshot = {cframe = root.CFrame, velocity = linear}
+        if grounded and not movingPlatform then
+            S.flingLastStableCF = root.CFrame
+            S.flingLastStableAt = now
+        end
+        -- Idle hold engages immediately once ground and low movement are
+        -- verified. Releasing it happens before the next physics step.
+        if canHold and not root.Anchored and finite then
+            local flat = Vector3.new(linear.X, 0, linear.Z).Magnitude
+            if flat <= Config.FlingStationaryMaxSpeed
+                and math.abs(linear.Y) <= Config.FlingStationaryMaxVertical then
+                S.flingHoldTarget = root.CFrame
+                H.claim(root, "Anchored", true, "fling_hold")
+                H.zeroRigVelocity()
+                S.flingSnapshot = nil
+            end
+        end
+    elseif phase == "post" then
+        S.flingSnapshot = nil
+    end
+end
+
+-- AFK Streak combines stable position hold with the original 18-second local
+-- movement pulse. The single AFK switch owns both behaviors. Never anchor
+-- when moving, jumping, flying, locked, teleporting, or on a moving platform.
+function H.releaseIdle(grace, keepTarget)
+    H.release("idle")
+    if not keepTarget then
+        S.idleTarget, S.idleSince, S.idleSample = nil, nil, nil
+    end
+    if grace then
+        S.idleBlockedUntil = os.clock() + Config.IdleInputGrace
+    end
+end
+
+function H.idleGroundInfo(ctx)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {ctx.character}
+    params.RespectCanCollide = true
+    local height = math.max(3.5, ctx.humanoid.HipHeight + ctx.root.Size.Y * 0.5 + 1.5)
+    local hit = Workspace:Raycast(ctx.root.Position, Vector3.new(0, -height, 0), params)
+    if not hit or hit.Normal.Y < 0.45 then return false, false end
+    if hit.Instance:IsA("BasePart") then
+        local velocity = hit.Instance.AssemblyLinearVelocity
+        if not H.finiteVector(velocity) then return false, false end
+        return true, velocity.Magnitude > Config.IdleMovingPlatformSpeed
+    end
+    return true, false -- Terrain is stationary.
+end
+
+function H.updateAFK()
+    if not S.flags.afk or not H.ready() then
+        H.releaseIdle(false)
+        S.afkPulseUntil = nil
+        return
+    end
+
+    local ctx = S.context
+    local now = os.clock()
+    local humanoid = ctx.humanoid
+    local state = humanoid:GetState()
+    local input = H.inputMoveVector()
+    -- During and briefly after our own pulse, MoveDirection reflects the
+    -- synthetic Move() call, not necessarily actual player input.
+    local synthetic = S.afkPulseUntil ~= nil or now < S.afkPostPulseUntil
+    local playerMoving = (input and input.Magnitude > 0.06)
+        or (not synthetic and humanoid.MoveDirection.Magnitude > 0.06)
+    local grounded, movingPlatform = H.idleGroundInfo(ctx)
+    local unavailable = playerMoving or humanoid.Jump or humanoid.Sit
+        or humanoid.PlatformStand or state == Enum.HumanoidStateType.Jumping
+        or state == Enum.HumanoidStateType.Ragdoll
+        or state == Enum.HumanoidStateType.FallingDown
+        or state == Enum.HumanoidStateType.PlatformStanding
+        or (state == Enum.HumanoidStateType.Freefall and not grounded)
+        or not grounded or movingPlatform
+        or S.flags.lock or S.escape ~= nil or S.mover ~= nil
+        or S.flying or S.hovering
+
+    if unavailable then
+        if S.afkPulseUntil then humanoid:Move(Vector3.zero, false) end
+        S.afkPulseUntil = nil
+        S.afkPostPulseUntil = -math.huge
+        S.afkLastPulse = now
+        H.releaseIdle(playerMoving or humanoid.Jump)
+        return
+    end
+
+    -- Keep the exact held CFrame during the brief activity pulse. Previously
+    -- resetting the target here caused intermittent drift and failed re-arming.
+    if S.afkPulseUntil then
+        if now >= S.afkPulseUntil then
+            humanoid:Move(Vector3.zero, false)
+            S.afkPulseUntil = nil
+            S.afkPostPulseUntil = now + Config.IdleInputGrace
+            H.releaseIdle(true, true)
+        else
+            humanoid:Move(Vector3.new(0, 0, Config.AFKMovementPulse), false)
+        end
+        return
+    end
+
+    if S.idleTarget and now - S.afkLastPulse >= Config.AFKPulsingInterval then
+        H.releaseIdle(false, true) -- unanchor temporarily, keep original position
+        S.afkLastPulse = now
+        S.afkPulseUntil = now + Config.AFKPulsingDuration
+        humanoid:Move(Vector3.new(0, 0, Config.AFKMovementPulse), false)
+        return
+    end
+
+    if now < S.idleBlockedUntil then
+        H.release("idle") -- cooldown must not erase the pre-pulse destination
+        return
+    end
+
     if not S.idleTarget then
-        if ctx.root.AssemblyLinearVelocity.Magnitude > 2 then S.idleSince = nil; return end
-        S.idleSince = S.idleSince or os.clock()
-        if os.clock() - S.idleSince < Config.IdleSettleTime then return end
+        local velocity = ctx.root.AssemblyLinearVelocity
+        if not H.finiteVector(velocity) then H.releaseIdle(false); return end
+        local planarSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+        if planarSpeed > Config.IdleMaxHorizontalSpeed then
+            S.idleSample, S.idleSince = nil, nil
+            return
+        end
+        local position = ctx.root.Position
+        if not S.idleSample or (position - S.idleSample).Magnitude > Config.IdleSettleRadius then
+            S.idleSample, S.idleSince = position, now
+            return
+        end
+        if now - (S.idleSince or now) < Config.IdleSettleTime then return end
         S.idleTarget = ctx.root.CFrame
+        S.afkLastPulse = now -- start 18 seconds after successfully becoming idle
     end
+
+    -- Anchor only while genuinely idle. Do not keep resetting the target if
+    -- minor physics jitter or the AFK pulse has displaced the player slightly.
     H.claim(ctx.root, "Anchored", true, "idle")
-    if (ctx.root.Position - S.idleTarget.Position).Magnitude > 0.05 then H.moveRoot(S.idleTarget) end
+    if (ctx.root.Position - S.idleTarget.Position).Magnitude > 0.35 then
+        H.moveRoot(S.idleTarget)
+    end
     H.zeroVelocity()
 end
 
@@ -1370,8 +1638,12 @@ function H.teleport(target, label)
         return false
     end
     H.stopMover()
-    H.release("idle")
-    S.idleTarget, S.idleSince = nil, nil
+    H.releaseIdle(true)
+    H.releaseFlingHold(0.9)
+    S.flingSnapshot = nil
+    S.afkPulseUntil = nil
+    S.afkPostPulseUntil = -math.huge
+    S.afkLastPulse = os.clock()
     local oldLock, oldEscape = S.lockTarget, S.escape
     if S.flags.lock then
         if not H.beginEscapeMove(chosen, "manual", chosen, label) then
@@ -1446,15 +1718,17 @@ function H.setToggle(key, enabled)
     if S.flags[key] == enabled then return true end
     if enabled and not H.ready() then H.notice("Wait for a living character", 4); return false end
     if enabled then
-        local conflicts = {lock = {"flight", "monster", "idle"}, flight = {"lock", "monster", "idle"},
-            monster = {"lock", "flight"}, idle = {"lock", "flight"}}
+        -- AFK Streak is independent of flight and Lock On; it pauses its hold
+        -- during either feature and resumes when normal idle movement returns.
+        local conflicts = {lock = {"flight", "monster"}, flight = {"lock", "monster"},
+            monster = {"lock", "flight"}}
         for _, other in ipairs(conflicts[key] or {}) do H.setToggle(other, false) end
     end
     S.flags[key] = enabled
     local ok, message = pcall(function()
         if key == "lock" then
             if enabled then
-                H.release("idle"); S.idleTarget, S.idleSince = nil, nil
+                H.releaseIdle(true)
                 H.stopEscapeHold()
                 S.lockSuspended = false
                 S.lockTarget, S.escape, S.lastEscape = S.context.root.CFrame, nil, -math.huge
@@ -1469,9 +1743,25 @@ function H.setToggle(key, enabled)
         elseif key == "noclip" then
             if enabled then H.noclip("noclip", true) else H.release("noclip") end
         elseif key == "fling" then
-            if enabled then H.recoverRagdoll() else H.release("fling") end
-        elseif key == "idle" then
-            H.release("idle"); S.idleTarget, S.idleSince = nil, nil
+            if enabled then
+                S.flingSnapshot = nil
+                S.flingLastStableCF = S.context.root.CFrame
+                S.flingLastStableAt = os.clock()
+                S.flingPauseUntil = os.clock() + 0.1
+                H.recoverRagdoll()
+            else
+                H.releaseFlingHold()
+                H.release("fling")
+                S.flingSnapshot = nil
+            end
+        elseif key == "afk" then
+            if S.afkPulseUntil and H.ready() then
+                S.context.humanoid:Move(Vector3.zero, false)
+            end
+            H.releaseIdle(true)
+            S.afkLastPulse, S.afkPulseUntil = os.clock(), nil
+            S.afkPostPulseUntil = -math.huge
+            if enabled then H.notice("AFK Streak on: hold when idle + periodic pulse", 4) end
         elseif key == "health" and enabled then
             H.notice("Health Recovery is local; server damage may still kill", 5)
         elseif key == "fall" and enabled then
@@ -1484,8 +1774,11 @@ function H.setToggle(key, enabled)
         if key == "lock" then H.stopLock(false)
         elseif key == "noclip" then H.release("noclip")
         elseif key == "flight" or key == "monster" then H.stopMover()
-        elseif key == "fling" then H.release("fling")
-        elseif key == "idle" then H.release("idle") end
+        elseif key == "fling" then H.releaseFlingHold(); H.release("fling")
+        elseif key == "afk" then
+            H.releaseIdle(false)
+            S.afkPulseUntil = nil
+        end
         H.report("Toggle " .. key, message)
     end
     H.updateSwitches()
@@ -1496,14 +1789,21 @@ function H.cleanupCharacter()
     H.disconnectAll(S.characterConnections)
     H.stopLock(false)
     H.stopMover()
+    H.releaseFlingHold()
     H.releaseAll()
-    S.context, S.idleTarget, S.idleSince, S.safeRoot, S.previousHealth = nil, nil, nil, nil, nil
+    S.context, S.idleTarget, S.idleSince, S.idleSample = nil, nil, nil, nil
+    S.idleBlockedUntil = -math.huge
+    S.afkLastPulse, S.afkPulseUntil, S.afkPostPulseUntil = os.clock(), nil, -math.huge
+    S.safeRoot, S.previousHealth = nil, nil
     S.safeTime, S.healing, S.lastDrop, S.lastJump = -math.huge, false, -math.huge, -math.huge
     S.lastJumpRequest = -math.huge
     S.lastDamageAt, S.lastSevereThreatAt = -math.huge, -math.huge
     S.homeThreatAt, S.lastEmergency = -math.huge, -math.huge
     S.damageEvents, S.impactEntries, S.recentHazard = {}, {}, nil
     S.lastFlingRecovery = -math.huge
+    S.flingHoldTarget, S.flingSnapshot, S.flingLastStableCF = nil, nil, nil
+    S.flingLastStableAt, S.flingPauseUntil, S.flingInputUntil = -math.huge, -math.huge, -math.huge
+    S.flingRecovering = false
     S.lockSuspended, S.escapeHold = false, nil
     S.lastChaseRelocate, S.lastChaseThreatAt = -math.huge, -math.huge
 end
@@ -1720,7 +2020,7 @@ S.ui.panel = H.make("Frame", {Name = "MainFrame", Active = true, BackgroundColor
 H.corner(S.ui.panel, 12)
 H.make("UIStroke", {Thickness = 1, Color = Color3.fromRGB(61, 72, 95)}, S.ui.panel)
 S.ui.title = H.make("TextLabel", {Active = true, Size = UDim2.new(1, -82, 0, 43), Position = UDim2.fromOffset(12, 0),
-    BackgroundTransparency = 1, Text = "GR33D  v7.5", TextColor3 = Color3.fromRGB(234, 240, 250),
+    BackgroundTransparency = 1, Text = "GR33D  v7.6", TextColor3 = Color3.fromRGB(234, 240, 250),
     TextSize = 14, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left}, S.ui.panel)
 S.ui.minimize = H.make("TextButton", {Text = "-", BackgroundColor3 = Color3.fromRGB(37, 43, 57),
     TextColor3 = Color3.fromRGB(234, 240, 250), TextSize = 19, Font = Enum.Font.GothamBold}, S.ui.panel)
@@ -1760,7 +2060,7 @@ H.connect(speedInput.FocusLost, function()
     else H.notice("Enter a finite numeric run speed", 3) end
     speedInput.Text = tostring(S.runSpeed)
 end)
-H.toggleRow("idle", "Idle Position Hold")
+H.toggleRow("afk", "AFK Streak")
 
 H.button("TP to Entry Spawn", function()
     if not H.ready() then H.notice("Wait for a living character", 3); return end
@@ -1786,7 +2086,7 @@ H.button("TP to Saved Map Location", function()
 end, Color3.fromRGB(43, 121, 91))
 
 H.button("Disable All / Restore Character", function()
-    for _, key in ipairs({"lock", "monster", "flight", "noclip", "fling", "trap", "run", "idle", "health", "fall"}) do
+    for _, key in ipairs({"lock", "monster", "flight", "noclip", "fling", "trap", "run", "afk", "health", "fall"}) do
         H.setToggle(key, false)
     end
     H.releaseAll()
@@ -1850,9 +2150,43 @@ task.spawn(function()
     if ok then S.controls = result end
 end)
 
+H.connect(UserInputService.InputBegan, function(input, gameProcessed)
+    if gameProcessed or not S.flags.fling or UserInputService:GetFocusedTextBox() then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local key = input.KeyCode
+    if key == Enum.KeyCode.W or key == Enum.KeyCode.A or key == Enum.KeyCode.S
+        or key == Enum.KeyCode.D or key == Enum.KeyCode.Up or key == Enum.KeyCode.Down
+        or key == Enum.KeyCode.Left or key == Enum.KeyCode.Right
+        or key == Enum.KeyCode.Space then
+        S.flingInputUntil = os.clock() + Config.FlingInputReleaseGrace
+        H.releaseFlingHold(Config.FlingInputReleaseGrace)
+    end
+end)
+
+H.connect(UserInputService.InputBegan, function(input, gameProcessed)
+    if gameProcessed or not S.flags.afk or UserInputService:GetFocusedTextBox() then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local key = input.KeyCode
+    if key == Enum.KeyCode.W or key == Enum.KeyCode.A or key == Enum.KeyCode.S
+        or key == Enum.KeyCode.D or key == Enum.KeyCode.Up or key == Enum.KeyCode.Down
+        or key == Enum.KeyCode.Left or key == Enum.KeyCode.Right
+        or key == Enum.KeyCode.Space then
+        if S.afkPulseUntil and H.ready() then
+            S.context.humanoid:Move(Vector3.zero, false)
+        end
+        H.releaseIdle(true)
+        S.afkLastPulse, S.afkPulseUntil = os.clock(), nil
+        S.afkPostPulseUntil = -math.huge
+    end
+end)
+
 H.connect(UserInputService.JumpRequest, function()
     -- A jump always releases the idle lease, even when flight is not armed.
-    H.release("idle"); S.idleTarget, S.idleSince = nil, nil
+    H.releaseIdle(true)
+    if S.flags.fling then
+        S.flingInputUntil = os.clock() + Config.FlingInputReleaseGrace
+        H.releaseFlingHold(Config.FlingInputReleaseGrace)
+    end
     if not S.flags.flight or not H.ready() or S.flags.lock or UserInputService:GetFocusedTextBox() then return end
     local now = os.clock()
     if now - S.lastJumpRequest < 0.12 then return end
@@ -1895,12 +2229,12 @@ function H.physicsTick()
     if not H.ready() then return end
     local ctx = S.context
     H.applyCollision()
-    H.updateFling()
+    H.updateFling("pre")
+    H.updateAFK()
     if S.flags.lock then
         if S.escape then H.updateEscapeHold() else H.applyLock() end
         return
     end
-    H.updateIdle()
     if S.mover then H.updateMover(); return end
     if ctx.root.Anchored then return end
     if S.flags.trap then
@@ -1937,9 +2271,9 @@ H.connect(RunService.PreSimulation, function()
     end
 end)
 
-H.connect(RunService.PostSimulation, function()
+H.connect(RunService.PostSimulation, function(dt)
     if S.flags.fling and H.ready() then
-        local ok, message = pcall(H.updateFling)
+        local ok, message = pcall(H.updateFling, "post", dt)
         if not ok then H.report("Post-physics anti-fling", message) end
     end
 end)
@@ -1984,9 +2318,12 @@ H.connect(RunService.Heartbeat, function(deltaTime)
         elseif S.flags.lock then S.ui.status.Text = "Position locked - client protection"
         elseif S.flying then S.ui.status.Text = "Flying - double-tap jump to stop"
         elseif S.hovering then S.ui.status.Text = "Evading a hostile NPC"
+        elseif S.flags.afk and S.afkPulseUntil then S.ui.status.Text = "AFK Streak: activity pulse"
+        elseif S.flags.afk and S.idleTarget then S.ui.status.Text = "AFK Streak: holding idle position"
+        elseif S.flags.afk then S.ui.status.Text = "AFK Streak: waiting for stable ground"
         else S.ui.status.Text = "Client protection tools ready" end
     end
 end)
 
 H.updateSwitches()
-print("[GR33D v7.5] Standalone client: lock pauses for escape, re-angles if pursued, rearms when safe. Flight preserved.")
+print("[GR33D v7.7] Anti-fling: immediate idle guard + pre/post impact recovery; anti-ragdoll, AFK Streak, flight, and escape preserved.")
